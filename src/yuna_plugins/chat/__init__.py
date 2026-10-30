@@ -6400,20 +6400,34 @@ async def _respond(
             else:
                 gen_llm = vllm
                 vision_detail = vision["detail"]
-                if vision["carry_history"]:
-                    gen_images, history_images, image_descriptions, current_image_description = (
-                        await _prepare_carry_images(
-                            vllm,
-                            recent_snapshot,
-                            images,
-                            vision_detail,
-                            msg_id,
-                            quoted_msg_id,
-                            "image",
+                try:
+                    if vision["carry_history"]:
+                        gen_images, history_images, image_descriptions, current_image_description = (
+                            await asyncio.wait_for(
+                                _prepare_carry_images(
+                                    vllm,
+                                    recent_snapshot,
+                                    images,
+                                    vision_detail,
+                                    msg_id,
+                                    quoted_msg_id,
+                                    "image",
+                                ),
+                                timeout=45,
+                            )
                         )
-                    )
-                else:
-                    gen_images = await _prepare_vision_images(images)
+                    else:
+                        gen_images = await asyncio.wait_for(
+                            _prepare_vision_images(images), timeout=35
+                        )
+                except asyncio.TimeoutError:
+                    # 视觉接口卡住时不能把整轮 @ 拖成几分钟没有回复。
+                    logger.warning("[chat] 图片准备超时，先用文本链路回复，不编造图片内容")
+                    gen_llm = llm
+                    gen_images = []
+                    history_images = {}
+                    image_descriptions = "（图片读取超时，本轮未能读取具体内容；不要编造图片内容，简短说明即可。）"
+                    current_image_description = image_descriptions
 
     gen_started = time.time()
 
