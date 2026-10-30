@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f4fb">
+  <meta name="description" content="Yuna Bot 管理面板：运行概览、插件、聊天人格、记忆与图片资源。">
+  <title>Yuna · 管理中心</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/style.css?v=20261026-ui-2">
+  <script src="/assets/theme.js"></script>
+  <script type="module" src="/assets/app.js?v=20261026-ui-2"></script>
+</head>
+<body>
+  <a class="skip-link" href="#page-host">跳到主要内容</a>
+
+  <section id="login-screen" class="login-shell" aria-labelledby="login-title">
+    <div class="login-art">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true">Y</span>
+        <span>Yuna<span class="brand-sub">console</span></span>
+      </div>
+      <div class="login-copy">
+        <p class="eyebrow">YUNA BOT / CONTROL CENTER</p>
+        <h1 id="login-title">把日常，<br><em>照顾得更好一点。</em></h1>
+        <p class="login-lead">连接状态、插件、聊天人格、记忆与表情资源，都在同一个安静的工作台里。</p>
+      </div>
+      <ul class="login-points">
+        <li><span class="point-dot"></span>实时掌握 Bot 与插件状态</li>
+        <li><span class="point-dot"></span>为聊天人格调心情、看关系、管记忆</li>
+        <li><span class="point-dot"></span>缩略图缓存，让表情管理更轻快</li>
+      </ul>
+      <div class="login-foot">Yuna Bot · 连接每一个日常</div>
+      <div class="login-orb" aria-hidden="true"><span>Y</span></div>
+    </div>
+
+    <div class="login-panel">
+      <div class="login-card">
+        <div class="login-card-head">
+          <p class="eyebrow">ADMINISTRATION</p>
+          <h2>欢迎回来。</h2>
+          <p class="muted">输入管理口令，继续今天的工作。</p>
+        </div>
+        <form id="login-form" novalidate>
+          <label class="field">
+            <span>用户名 <small>可选，留空以所有者身份登录</small></span>
+            <input id="username" name="username" type="text" autocomplete="username" maxlength="32" placeholder="admin">
+          </label>
+          <label class="field">
+            <span>管理口令</span>
+            <span class="input-with-action">
+              <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="输入管理员口令">
+              <button type="button" class="ghost icon-button" id="password-toggle" aria-label="显示口令" title="显示口令" data-icon="eye"></button>
+            </span>
+          </label>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button type="submit" class="button primary login-submit">
+            <span>进入管理中心</span><span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <p class="login-hint">首次启动的口令位于 <code>data/admin/password.txt</code><br>会话有效期 8 小时，离开公共设备时请退出登录。</p>
+      </div>
+      <p class="login-version"><span class="status-dot"></span>Yuna Admin <span id="login-version">v2.1.0</span></p>
+    </div>
+  </section>
+
+  <div id="workspace" class="workspace" hidden>
+    <div id="sidebar-scrim" class="sidebar-scrim" hidden></div>
+    <aside id="sidebar" class="sidebar" aria-label="管理导航">
+      <div class="sidebar-head">
+        <a class="brand" href="#/overview" aria-label="Yuna 管理首页">
+          <span class="brand-mark" aria-hidden="true">Y</span>
+          <span class="brand-name">Yuna<span class="brand-sub">console</span></span>
+        </a>
+        <button class="ghost icon-button sidebar-close" id="sidebar-close" aria-label="关闭导航" data-icon="close"></button>
+      </div>
+
+      <nav class="nav" aria-label="主导航">
+        <div class="nav-group">
+          <p class="nav-label">工作台</p>
+          <button class="nav-item" data-nav="overview"><span data-icon="overview"></span><span>运行概览</span></button>
+          <button class="nav-item" data-nav="qq"><span data-icon="server"></span><span>QQ 连接与群资源</span></button>
+          <button class="nav-item" data-nav="plugins"><span data-icon="plugins"></span><span>插件管理</span><span class="nav-badge" id="nav-plugin-badge"></span></button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-label">聊天与人格</p>
+          <button class="nav-item" data-nav="chat"><span data-icon="chat"></span><span>聊天概览</span></button>
+          <button class="nav-item" data-nav="users"><span data-icon="users"></span><span>用户画像</span></button>
+          <button class="nav-item" data-nav="favor"><span data-icon="heart"></span><span>好感度</span></button>
+          <button class="nav-item" data-nav="favor-ledger"><span data-icon="book"></span><span>好感扣分账本</span></button>
+          <button class="nav-item" data-nav="human"><span data-icon="sparkles"></span><span>拟人状态</span></button>
+          <a class="nav-item" href="/next" target="_blank" rel="noopener"><span data-icon="sparkles"></span><span>新版语言面板</span></a>
+          <button class="nav-item" data-nav="world"><span data-icon="map"></span><span>世界地图</span></button>
+          <button class="nav-item" data-nav="social"><span data-icon="heart"></span><span>社交能力</span></button>
+          <button class="nav-item" data-nav="bots"><span data-icon="users"></span><span>机器人识别</span></button>
+          <button class="nav-item" data-nav="growth"><span data-icon="sprout"></span><span>成长人格</span></button>
+          <button class="nav-item" data-nav="whitelist"><span data-icon="shield"></span><span>白名单</span></button>
+          <button class="nav-item" data-nav="emotes"><span data-icon="image"></span><span>表情仓库</span></button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-label">数据与洞察</p>
+          <button class="nav-item" data-nav="stats"><span data-icon="chart"></span><span>统计总览</span></button>
+          <button class="nav-item" data-nav="chat-quality"><span data-icon="activity"></span><span>聊天质量</span></button>
+          <button class="nav-item" data-nav="eval"><span data-icon="check"></span><span>对话评测集</span></button>
+          <button class="nav-item" data-nav="relations"><span data-icon="users"></span><span>关系图谱</span></button>
+          <button class="nav-item" data-nav="memory-graph"><span data-icon="memory"></span><span>记忆图谱</span></button>
+          <button class="nav-item" data-nav="sessions"><span data-icon="sessions"></span><span>会话记忆</span></button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-label">系统</p>
+          <button class="nav-item" data-nav="config"><span data-icon="sliders"></span><span>环境配置</span></button>
+          <button class="nav-item" data-nav="jobs"><span data-icon="clock"></span><span>定时任务</span></button>
+          <button class="nav-item" data-nav="agent-apps"><span data-icon="activity"></span><span>APP 使用</span></button>
+          <button class="nav-item" data-nav="agent-payments"><span data-icon="shield"></span><span>支付管理</span></button>
+          <button class="nav-item" data-nav="ops"><span data-icon="bolt"></span><span>运维中心</span></button>
+          <button class="nav-item" data-nav="logs"><span data-icon="terminal"></span><span>运行日志</span></button>
+          <button class="nav-item" data-nav="messages"><span data-icon="send"></span><span>发送消息</span></button>
+          <button class="nav-item" data-nav="admins"><span data-icon="user-cog"></span><span>管理员</span></button>
+          <button class="nav-item" data-nav="roadmap"><span data-icon="map"></span><span>开发路线</span></button>
+        </div>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="sidebar-status">
+          <span class="status-dot"></span>
+          <div><strong>管理服务</strong><small id="sidebar-uptime">正在连接…</small></div>
+        </div>
+        <div class="sidebar-actions">
+          <button class="button secondary small sidebar-action" id="theme-toggle-sidebar" data-icon="moon">深色模式</button>
+          <button class="button secondary small sidebar-action" id="logout" data-icon="logout">退出</button>
+        </div>
+        <p class="sidebar-version">Yuna Admin <span id="sidebar-version">v2.1.0</span></p>
+      </div>
+    </aside>
+
+    <main class="main" id="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="ghost icon-button mobile-only" id="sidebar-open" aria-label="打开导航" data-icon="menu"></button>
+          <div class="page-heading">
+            <p class="eyebrow" id="page-eyebrow">YUNA / ADMINISTRATION</p>
+            <h1 id="page-title">运行概览</h1>
+            <p class="page-subtitle" id="page-subtitle">一眼掌握 Yuna 的运行状态。</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <button class="ghost icon-button" id="command-open" aria-label="打开命令面板" title="命令面板 (Ctrl/⌘ K)" data-icon="search"></button>
+          <button class="ghost icon-button" id="refresh" aria-label="刷新当前页面" title="刷新" data-icon="refresh"></button>
+          <span class="live-chip" id="live-chip" hidden><span class="live-dot"></span>实时</span>
+          <button class="button secondary small theme-button" id="theme-toggle" data-icon="moon" aria-label="切换主题">深色</button>
+          <div class="user-chip" id="user-chip" title="当前账号">
+            <span class="avatar" id="user-avatar">A</span>
+            <span class="user-meta"><strong id="user-name">admin</strong><small id="user-role">所有者</small></span>
+          </div>
+        </div>
+      </header>
+
+      <div id="page-host" class="page-host" tabindex="-1">
+        <div class="page-skeleton" aria-label="加载中">
+          <div class="skeleton skeleton-title"></div>
+          <div class="skeleton-grid"><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div><div class="skeleton skeleton-card"></div></div>
+          <div class="skeleton skeleton-block"></div>
+        </div>
+      </div>
+
+      <footer class="main-foot">
+        <span>Yuna Bot · 连接每一个日常</span>
+        <span id="foot-meta">Admin v2.1.0</span>
+      </footer>
+    </main>
+  </div>
+
+  <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="false"></div>
+  <div id="modal-host" class="modal-host" hidden></div>
+  <div id="palette" class="palette" hidden role="dialog" aria-modal="true" aria-label="命令面板">
+    <div class="palette-card">
+      <div class="palette-search">
+        <span data-icon="search" aria-hidden="true"></span>
+        <input id="palette-input" type="search" placeholder="搜索页面、操作或用户…" autocomplete="off" aria-label="搜索">
+        <kbd>Esc</kbd>
+      </div>
+      <div id="palette-list" class="palette-list" role="listbox"></div>
+      <div class="palette-foot"><span>↑↓ 选择</span><span>Enter 打开</span><span>Ctrl/⌘ K 呼出</span></div>
+    </div>
+  </div>
+
+  <noscript><div class="noscript">管理面板需要启用 JavaScript。</div></noscript>
+</body>
+</html>

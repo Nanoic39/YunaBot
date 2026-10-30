@@ -1,0 +1,22 @@
+<script setup>
+import {ref,reactive,onMounted,onUnmounted,computed} from 'vue';
+import {stamp,errorMessage} from './resources.js';
+const props=defineProps(['request','notify']);const abort=new AbortController();
+const data=ref(null),error=ref(''),busy=ref(false),saving=ref(false),dirty=ref(false),query=ref('');const form=reactive({});
+const friends=computed(()=>{const rows=[...(data.value?.friends||[])];for(const id of form.comment_users||[])if(!rows.some(f=>f.id===id))rows.push({id,name:'已保存的成员 '+id});return rows.filter(f=>(f.name+' '+f.id).toLowerCase().includes(query.value.toLowerCase()));});
+async function refresh(){if(busy.value)return;busy.value=true;error.value='';try{data.value=await props.request('qq/qzone-social',{signal:AbortSignal.any([abort.signal,AbortSignal.timeout(15000)])});if(!dirty.value)Object.assign(form,JSON.parse(JSON.stringify(data.value.policy)));}catch(e){error.value=errorMessage(e);}finally{busy.value=false;}}
+async function save(){if(saving.value||busy.value)return;saving.value=true;error.value='';try{await props.request('qq/qzone-social',{method:'PUT',body:JSON.stringify(form),signal:AbortSignal.any([abort.signal,AbortSignal.timeout(15000)])});dirty.value=false;props.notify('空间互动设置已保存；评论白名单独立生效');await refresh();}catch(e){error.value=errorMessage(e);}finally{saving.value=false;}}
+onMounted(refresh);onUnmounted(()=>abort.abort());
+</script>
+<template><details class="panel qq-advanced"><summary>好友空间互动 <small class="muted">{{data?.policy?.enabled?'偶尔浏览 · 按兴趣点赞':'已暂停'}} · 评论授权 {{data?.policy?.comment_users?.length||0}} 人</small></summary><div class="panel-body">
+ <p>空闲且未睡觉、未执行电脑任务时，偶尔看看好友空间。浏览和点赞对全部好友有效，评论只针对下方独立授权的好友。不会从聊天白名单自动继承。</p>
+ <p v-if="error" class="notice" role="alert">{{error}}</p><p v-if="data?.warning" class="notice">{{data.warning}}</p><button class="button small" :disabled="busy||saving" @click="refresh">更新状态</button>
+ <form v-if="data" @submit.prevent="save" @change="dirty=true"><fieldset :disabled="saving"><div class="row"><label><input type="checkbox" v-model="form.enabled"> 启用空间互动</label><label><input type="checkbox" v-model="form.likes"> 按兴趣点赞</label><label><input type="checkbox" v-model="form.comments"> 允许白名单评论</label></div>
+ <div class="qq-checks"><label>每日浏览会话（0—4）<input class="input" type="number" min="0" max="4" v-model.number="form.sessions_daily"></label><label>每日点赞上限（0—20）<input class="input" type="number" min="0" max="20" v-model.number="form.likes_daily"></label><label>每日评论上限（0—5）<input class="input" type="number" min="0" max="5" v-model.number="form.comments_daily"></label></div>
+ <h4>浏览时段（北京时间）</h4><div class="row" v-for="(window,index) in form.windows" :key="index"><label>开始小时 <input class="input" style="width:90px" type="number" min="0" max="23" v-model.number="window[0]"></label><label>结束小时 <input class="input" style="width:90px" type="number" min="1" max="24" v-model.number="window[1]"></label><button class="button small" type="button" :disabled="form.windows.length<=1" @click="form.windows.splice(index,1);dirty=true">移除此时段</button></div><button type="button" class="button small" :disabled="form.windows?.length>=4" @click="form.windows.push([15,16]);dirty=true">增加时段</button>
+ <h4>允许主动评论的好友</h4><p class="small muted">默认空；勾选只授予空间评论，不开放私聊权限。同一好友每天最多点赞一次、评论一次。接口结果不明不会重发。</p><input class="input" v-model="query" @change.stop placeholder="搜索好友昵称或备注" aria-label="搜索空间评论好友"><div style="max-height:240px;overflow:auto"><label v-for="friend in friends" :key="friend.id" class="row"><input type="checkbox" :value="friend.id" v-model="form.comment_users"> {{friend.name}} <small class="muted mono">{{friend.id}}</small></label></div>
+ <button class="button primary small" :disabled="!dirty||saving||busy" type="submit">保存空间互动</button></fieldset></form>
+ <p class="small muted">每次最多阅读5条可用文字动态，完成后休息90—240分钟；没有感兴趣或合适的内容就不互动。下一次最早检查：{{stamp(data?.next)}}，还需满足时段和空闲条件。</p>
+ <details v-if="data?.sessions?.length"><summary>最近浏览概要（{{data.sessions.length}}次）</summary><p v-for="(row,i) in data.sessions" :key="i">{{stamp(row.time)}} · {{row.state}} · {{row.summary}}</p></details>
+ <details v-if="data?.actions?.length"><summary>点赞与评论记录（最近{{data.actions.length}}条）</summary><details v-for="(row,i) in data.actions" :key="i"><summary>{{stamp(row.time)}} · {{row.action==='like'?'点赞':'评论'}} · {{row.status==='succeeded'?'接口确认成功':'结果未确认，不重发'}}</summary><p class="mono">作者 {{row.uin}} · 动态 {{row.tid}}</p></details></details>
+ </div></details></template>

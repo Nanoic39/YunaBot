@@ -1,0 +1,37 @@
+# Yuna Bot —— Ubuntu 24.04.3 LTS（Python 3.12）依赖
+# 仅列项目「直连依赖」，子依赖由 pip 自动解析；Windows 专属包（pywin32/pyreadline3）已剔除。
+#
+# 安装：
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   python -m pip install -U pip
+#   python -m pip install -r requirements-ubuntu.txt
+#
+# 浏览器渲染（poster/playwright 相关）额外执行一次：
+#   python -m playwright install --with-deps chromium
+
+# ---- 核心框架 ----
+nonebot2[fastapi,websockets]>=2.5.0
+nonebot-adapter-onebot>=2.4.6
+nonebot-adapter-telegram>=0.1.0b20
+nonebot-plugin-apscheduler>=0.5.0
+
+# ---- Web / 网络 ----
+httpx>=0.27.0
+fastapi>=0.110.0
+
+# ---- 配置 / 模板 ----
+pydantic>=2.7.0
+jinja2>=3.1.0
+
+# ---- 图像 / 中文分词 / 词云 ----
+pillow>=10.0.0
+jieba>=0.42.1
+wordcloud>=1.9.3
+
+# ---- 系统状态插件（nonebot_plugin_status） ----
+psutil>=5.9.0
+humanize>=4.9.0
+
+# ---- 浏览器渲染 ----
+playwright>=1.40.0
