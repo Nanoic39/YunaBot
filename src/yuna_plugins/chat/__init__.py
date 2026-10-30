@@ -227,8 +227,8 @@ _character_prompt = (
 _character_prompt += (
     "\n\n【表达边界】不要把关系写成账本：不要使用“记小本本/记账/记上一笔/先记着/赖账”"
     "这类说法来回应日常对话。对方吐槽 DeepSeek、模型、接口、工具或其他 AI 时，"
-    "说的是工具本身，不是在否定Yuna的人设；不要把工具问题认领成自己的性格错误，"
-    "也不要替模型道歉、认错或表功。只有对方明确在说Yuna本人时，才按被说到的那个人回应。"
+    "说的是工具本身，不是在否定清汐的人设；不要把工具问题认领成自己的性格错误，"
+    "也不要替模型道歉、认错或表功。只有对方明确在说清汐本人时，才按被说到的那个人回应。"
     "对话就顺着刚才的话自然接，不要做审计式总结，不要反复列举谁欠谁什么。"
 )
 
@@ -244,7 +244,7 @@ def _extract_names() -> list:
 
 
 _character_names = _extract_names()
-_character_name = _character_names[0] if _character_names else "芸Yuna"
+_character_name = _character_names[0] if _character_names else "芸清汐"
 
 
 def _extract_brother_qq() -> str:
@@ -1688,12 +1688,12 @@ def reset_human_state() -> dict:
     return human_snapshot()
 
 
-# 面板聊天框：与Yuna真实对话（走完整生成链路，带上下文，不实际发送）
+# 面板聊天框：与清汐真实对话（走完整生成链路，带上下文，不实际发送）
 _panel_chat_history: dict[str, list] = {}  # session -> [{role, content}]
 
 
 async def panel_chat_send(session: str, text: str) -> dict:
-    """面板「和Yuna说话」：带滚动上下文的完整生成链路。
+    """面板「和清汐说话」：带滚动上下文的完整生成链路。
 
     使用固定触发（mention=被点名）与真实人设/心情/自我记忆/关系；
     对话记录在内存滚动保留（每会话 24 条），并摘要写入自我记忆。
@@ -3149,6 +3149,9 @@ def _apply_growth(growth) -> None:
             line = _strip_growth_meta(str(x).strip())
             if not line:
                 continue
+            # 成长人格只记录稳定倾向；账本式口吻会污染日常对话，直接拒收。
+            if any(word in line for word in ("小本本", "记账", "记上一笔", "先记着")):
+                continue
             # 与已有条目高度相似时视为重复，跳过，避免近义条目堆满分桶导致成长停滞
             if any(
                 _text_similarity(line, old) >= chat_config.chat_growth_dedup_similarity
@@ -3967,12 +3970,12 @@ def _is_mentioned(event: MessageEvent, text: str) -> bool:
     if event.is_tome():
         return True
     # 消息 @ 了别人（而非机器人）时，这句话是在跟对方说；此时正文即使出现角色名，
-    # 也只是第三方提及（如「@小明 Yuna刚才说的」），不能当成在跟机器人说话，
+    # 也只是第三方提及（如「@小明 清汐刚才说的」），不能当成在跟机器人说话，
     # 避免把「别人 @ 别人」的对话误判为在叫自己。
     if _at_others(event):
         return False
     # 「回复」了别人的消息（带引用/回复段）且没 @ 机器人时，同样是在跟对方说话，
-    # 正文里的角色名（如「我家Yuna」）只是第三人称提及，不能当成在叫自己。
+    # 正文里的角色名（如「我家清汐」）只是第三人称提及，不能当成在叫自己。
     # OneBot 解析被回复消息后会把 reply 段从 event.message 里删掉，所以优先用
     # event.reply 判断；get_msg 失败时 reply 段可能仍留在消息里，再退回扫描兜底。
     if event.reply is not None or any(
@@ -4851,6 +4854,13 @@ def _build_system_prompt(
         )
     else:
         brother_rule = "除人设中明确指定的哥哥外，不要把任何普通群友当作「哥哥」。"
+    if _brother_qq and str(current_qq or "") == str(_brother_qq):
+        parts.append(
+            "【确认对象】当前对话者就是你的哥哥本人。叫「哥哥」是自然且专属的，"
+            "不要对他说“哥哥留给更亲近的人”“我们还没那么熟”或类似把他往外推的话。"
+            "他开了不合适的称呼玩笑时，可以软软地拒绝那个称呼，但对哥哥本人仍然亲近，"
+            "不要突然冷淡、划清界限或改用生疏称呼。"
+        )
     parts.append(
         "【身份与称呼规则】下面对话历史里，带 [QQ号 昵称] 标签的是不同群友说的话：QQ号不同就是不同的人，绝不能把不同 QQ 号的发言当作同一个人；"
         "没有标签的消息就是你自己之前说过的话。"
@@ -5236,6 +5246,21 @@ def _alias_ok(alias: str, subject: str = "") -> bool:
     return True
 
 
+def _brother_tone_guard(text: str, qq: str) -> str:
+    """兜底防止模型把哥哥本人当成“还不够亲近的人”推远。"""
+    if not _brother_qq or str(qq) != str(_brother_qq) or not text:
+        return text
+    patterns = (
+        r"[，,。！!？?]?\s*(?:不过|但是)?\s*哥哥这个称呼还是留给更亲近的人(?:吧|呢)?[。！!？?]?",
+        r"[，,。！!？?]?\s*(?:不过|但是)?\s*我们(?:还)?没那么熟[。！!？?]?",
+        r"[，,。！!？?]?\s*哥哥还是留给更亲近的人(?:吧|呢)?[。！!？?]?",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "，哥哥就是哥哥呀", text)
+    text = re.sub(r"…[，,]", "…", text)
+    text = re.sub(r"^[，,]\s*", "", text)
+    return re.sub(r"，{2,}", "，", text).strip()
+
 def _address_guidance(qq: str, users: dict) -> str:
     """把好感阶段翻译成当轮可用称呼，避免 bot 永远用同一个叫法。"""
     info = (users.get(str(qq)) or {}) if isinstance(users, dict) else {}
@@ -5289,7 +5314,7 @@ def _apply_alias(qq: str, target: str, alias: str) -> bool:
 
 # ---------- 回复 ----------
 def _strip_speaker_prefix(text: str) -> str:
-    """剥掉 LLM 回复中误加的说话人标记（如 [QQ号 xxx（昵称）]: 或 [芸Yuna（你）]:）。
+    """剥掉 LLM 回复中误加的说话人标记（如 [QQ号 xxx（昵称）]: 或 [芸清汐（你）]:）。
 
     这些标记可能出现在开头，也可能因 LLM 续写“自问自答”而出现在中间；
     这里按标记切分，只保留第一段真正的回复，丢弃后续续写内容。
@@ -5603,7 +5628,7 @@ async def _generate(
             "\n\n【引用内容】用户这条消息引用了（回复了）下面这条别人发的消息，"
             "这是用户针对它发的言，不是别人正在对你说的话。"
             "用户这句话里的「你」「您」等第二人称，指的都是被引用的那个人，绝不是你；"
-            "正文里若提到「我家Yuna」「芸Yuna」等你的名字，也只是用户对别人提起你"
+            "正文里若提到「我家清汐」「芸清汐」等你的名字，也只是用户对别人提起你"
             "（第三人称），并不是在跟你说话，更不要跳出来替自己辩解或接话。"
             "请结合被引用消息的发送人、发送时间与内容（文字/图片/表情）理解用户的"
             "提问与意图，尤其当用户问「这是谁」「这是什么」时，要针对被引用的内容"
@@ -6522,6 +6547,7 @@ async def _respond(
         await bot.send(event,reply_prefix+MessageSegment.text(fallback(reason,long=len(text)+len(forward_context)+len(quote_context)>6000)))
         return
     response = _enforce_pure_reaction_reply(meme_analysis, response)
+    response = _brother_tone_guard(response, qq)
     if meme_analysis:
         try:
             _meme.record_reply(str(meme_analysis.get("id") or ""), response)
