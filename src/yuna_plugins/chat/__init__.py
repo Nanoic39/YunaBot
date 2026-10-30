@@ -1658,7 +1658,7 @@ async def _distill_self_facts_job() -> None:
             + "\n".join(lines)
             + '\n只输出 JSON：{"reflections": [{"text":"...","evidence_ids":["..."]}]}'
         )
-        raw = await _global_llm.chat(
+        raw = await _utility_llm().chat(
             [{"role": "system", "content": "你只输出 JSON 对象。"},
              {"role": "user", "content": prompt}],
             temperature=0.2,
@@ -2081,7 +2081,7 @@ def proactive_snapshot():
 
 async def _attribute_share_feedback(gid, text, shares, quoted_id, message_id):
     try:
-        result = await classify_feedback(_global_llm, text, shares, list(_recent.get(gid, [])), quoted_id)
+        result = await classify_feedback(_utility_llm(), text, shares, list(_recent.get(gid, [])), quoted_id)
         if result and _life.note_group_reply(gid, text, event_id=result['event_id'], sentiment=result['sentiment']):
             _proactive_guard.feedback(gid, result['event_id'], result, message_id)
     except Exception as error:
@@ -2134,7 +2134,7 @@ async def _maybe_share_life_event():
             text = await _generate_life_share(event)
             if not text:
                 continue
-            if not await approve_share(_global_llm, text, _proactive_guard.recent(gid)):
+            if not await approve_share(_utility_llm(), text, _proactive_guard.recent(gid)):
                 _proactive_guard.record(gid, eid, text, "rejected")
                 continue
             await _human_pause(text, "auto")
@@ -7096,7 +7096,7 @@ async def _handle_group(
         targeting["direct_to_bot"] = True
         targeting["semantic_target"] = "bot"
     if chat_config.chat_semantic_targeting_enabled:
-        targeting = await resolve_target(_get_llm(gid), text, targeting, list(_recent.get(gid, [])),
+        targeting = await resolve_target(_utility_llm(), text, targeting, list(_recent.get(gid, [])),
                                          str(event.self_id), quote_context, session=gid)
     if at_bot:
         targeting["direct_to_bot"] = True
@@ -7109,7 +7109,7 @@ async def _handle_group(
     try:
         if targeting.get('direct_to_bot') and not _is_bot(qq):
             from src.agent.chat_preferences import preferences
-            asyncio.create_task(preferences.learn(_get_llm(gid),text,qq,qq in {str(q) for q in get_driver().config.superusers},'group:'+gid, [{'qq':r.get('qq'),'text':str(r.get('content',''))[:200]} for r in list(_recent.get(gid,[]))[-6:]]))
+            asyncio.create_task(preferences.learn(_utility_llm(),text,qq,qq in {str(q) for q in get_driver().config.superusers},'group:'+gid, [{'qq':r.get('qq'),'text':str(r.get('content',''))[:200]} for r in list(_recent.get(gid,[]))[-6:]]))
     except Exception:pass
     targeting_hint = targeting_hint_text(targeting)
     pronoun_hint = _pronoun_reference_hint(text, list(_recent.get(gid, [])), qq)
@@ -7250,7 +7250,7 @@ async def _handle_group(
         and not _daily_token_cap_reached()
     ):
         if chat_config.chat_semantic_targeting_enabled and not targeting.get('semantic_checked'):
-            targeting = await resolve_target(_get_llm(gid), text, targeting, list(_recent.get(gid, [])),
+            targeting = await resolve_target(_utility_llm(), text, targeting, list(_recent.get(gid, [])),
                                              str(event.self_id), quote_context, session=gid, force=True)
             if targeting.get('semantic_target') not in ('bot', 'mixed', 'group'):
                 return
@@ -7311,7 +7311,7 @@ async def _handle_private(
         _extract_face_text(event.get_message()),
     )
     from src.agent.chat_preferences import preferences
-    asyncio.create_task(preferences.learn(_get_llm(''),text,qq,qq in {str(q) for q in get_driver().config.superusers},'user:'+qq))
+    asyncio.create_task(preferences.learn(_utility_llm(),text,qq,qq in {str(q) for q in get_driver().config.superusers},'user:'+qq))
 
     try:
         _profiles.mark_seen(qq, None, display)
@@ -7580,10 +7580,11 @@ async def handle_recall(event: GroupRecallNoticeEvent | FriendRecallNoticeEvent)
 
 # ---------- 玩梗接梗：长期语义记忆与联网学习 ----------
 async def _slang_extract_json(prompt: str, max_tokens: int = 900) -> list:
-    if not _global_llm.available:
+    llm = _utility_llm()
+    if not llm.available:
         return []
     try:
-        raw = await _global_llm.chat(
+        raw = await llm.chat(
             [{"role": "system", "content": "你只输出 JSON，不要输出 Markdown。"},
              {"role": "user", "content": prompt}],
             temperature=0.2,
