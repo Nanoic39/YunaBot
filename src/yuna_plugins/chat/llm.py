@@ -221,6 +221,10 @@ class LLMClient:
         }
         if disable_thinking:
             payload["thinking"] = {"type": "disabled"}
+            # Gemini 3.x 在上游仍可能把 reasoning 写进正文；forced minimal 与
+            # thinking disabled 同时使用时可稳定只返回最终答案。
+            if "gemini" in str(self.model or "").lower():
+                payload["reasoning_effort"] = "minimal"
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         started = time.monotonic()

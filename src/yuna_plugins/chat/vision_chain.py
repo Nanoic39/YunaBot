@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
@@ -43,6 +44,46 @@ def _mask_key(value: str) -> str:
     if len(raw) <= 8:
         return "••••"
     return raw[:4] + "••••" + raw[-4:]
+
+
+def _cjk_ratio(text: str) -> float:
+    raw = str(text or "")
+    if not raw:
+        return 0.0
+    cjk = sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff")
+    return cjk / max(1, len(raw))
+
+
+def clean_gemini_output(text: str, json_mode: bool = False) -> str:
+    """去掉 Gemini 偶尔混进正文的英文思考过程，只留最终答案。
+
+    不按关键词判定业务内容，只是清理模型输出结构：优先取第一段中文正文；
+    没有中文正文时取最后一个非空段落。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(r"^```(?:json|markdown)?\s*|\s*```$", "", raw, flags=re.I).strip()
+    if json_mode:
+        starts = [i for i, ch in enumerate(raw) if ch in "[{"]
+        for start in starts:
+            try:
+                json.loads(raw[start:])
+                return raw[start:].strip()
+            except Exception:
+                continue
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", raw) if block.strip()]
+    markers = ("my analysis", "my processing", "my immediate response", "okay,", "okay the",
+               "the user wants", "the user's", "i need to", "i should", "let me", "first,",
+               "we need", "here's how", "here is how", "**my ", "**final answer", "final answer:")
+    for index, block in enumerate(blocks):
+        low = block.lower()
+        if _cjk_ratio(block) >= 0.22 and not any(marker in low for marker in markers):
+            return "\n\n".join(blocks[index:]).strip()
+    # 没有中文正文（例如用户明确要求英文）时，丢掉明显的 reasoning 前缀，保留最后一段。
+    if any(marker in blocks[0].lower() for marker in markers) and len(blocks) > 1:
+        return blocks[-1].strip()
+    return raw
 
 
 def _public_node(node: dict) -> dict:
@@ -335,15 +376,18 @@ class VisionChainClient:
                 content = [{"role": "system", "content": prompt}] + list(messages)
             started = time.monotonic()
             try:
+                node_disable = bool(disable_thinking or "gemini" in str(node.get("model") or "").lower())
                 text, usage = await asyncio.wait_for(
                     llm.chat_with_usage(content, temperature, max_tokens,
-                                        disable_thinking=disable_thinking, json_mode=json_mode,
+                                        disable_thinking=node_disable, json_mode=json_mode,
                                         context_guard=context_guard),
                     timeout=max(5, int(node.get("timeout") or 45)),
                 )
                 latency = int((time.monotonic() - started) * 1000)
                 if str(text or "").strip():
                     self.chain.record(node, self.purpose, True, latency)
+                    if "gemini" in str(node.get("model") or "").lower():
+                        text = clean_gemini_output(text, json_mode=json_mode)
                     return str(text).strip(), usage
                 raise RuntimeError("返回为空")
             except Exception as error:
@@ -391,14 +435,17 @@ class VisionChainClient:
                 content = [{"role": "system", "content": prompt}] + list(messages)
             started = time.monotonic()
             try:
+                node_disable = bool(disable_thinking or "gemini" in str(node.get("model") or "").lower())
                 text = await asyncio.wait_for(
                     llm.chat(content, temperature, max_tokens,
-                             disable_thinking=disable_thinking, json_mode=json_mode),
+                             disable_thinking=node_disable, json_mode=json_mode),
                     timeout=max(5, int(node.get("timeout") or 45)),
                 )
                 latency = int((time.monotonic() - started) * 1000)
                 if str(text or "").strip():
                     self.chain.record(node, self.purpose, True, latency)
+                    if "gemini" in str(node.get("model") or "").lower():
+                        text = clean_gemini_output(text, json_mode=json_mode)
                     return str(text).strip()
                 raise RuntimeError("返回为空")
             except Exception as error:
