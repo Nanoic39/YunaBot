@@ -132,7 +132,15 @@ CONFIG_DIR = Path(os.environ.get("YUNA_CONFIG_DIR") or (PROJECT_ROOT / "config")
 
 def _personal_path(name: str, legacy: Path) -> Path:
     candidate = CONFIG_DIR / name
-    return candidate if candidate.exists() else legacy
+    if candidate.exists():
+        return candidate
+    # 公开仓库只带 .example，部署者未提供个人配置时用通用示例启动，
+    # 不会回退到源码目录里的任何私人文件。
+    source = Path(name)
+    example = CONFIG_DIR / f"{source.stem}.example{source.suffix}"
+    if example.exists():
+        return example
+    return legacy
 
 
 WHITELIST_GROUP_FILE = _personal_path("whitelist_group.json", PLUGIN_DIR / "whitelist_group.json")
@@ -219,8 +227,8 @@ _character_prompt = (
 _character_prompt += (
     "\n\n【表达边界】不要把关系写成账本：不要使用“记小本本/记账/记上一笔/先记着/赖账”"
     "这类说法来回应日常对话。对方吐槽 DeepSeek、模型、接口、工具或其他 AI 时，"
-    "说的是工具本身，不是在否定Yuna的人设；不要把工具问题认领成自己的性格错误，"
-    "也不要替模型道歉、认错或表功。只有对方明确在说Yuna本人时，才按被说到的那个人回应。"
+    "说的是工具本身，不是在否定清汐的人设；不要把工具问题认领成自己的性格错误，"
+    "也不要替模型道歉、认错或表功。只有对方明确在说清汐本人时，才按被说到的那个人回应。"
     "对话就顺着刚才的话自然接，不要做审计式总结，不要反复列举谁欠谁什么。"
 )
 
@@ -236,7 +244,7 @@ def _extract_names() -> list:
 
 
 _character_names = _extract_names()
-_character_name = _character_names[0] if _character_names else "芸Yuna"
+_character_name = _character_names[0] if _character_names else "芸清汐"
 
 
 def _extract_brother_qq() -> str:
@@ -1680,12 +1688,12 @@ def reset_human_state() -> dict:
     return human_snapshot()
 
 
-# 面板聊天框：与Yuna真实对话（走完整生成链路，带上下文，不实际发送）
+# 面板聊天框：与清汐真实对话（走完整生成链路，带上下文，不实际发送）
 _panel_chat_history: dict[str, list] = {}  # session -> [{role, content}]
 
 
 async def panel_chat_send(session: str, text: str) -> dict:
-    """面板「和Yuna说话」：带滚动上下文的完整生成链路。
+    """面板「和清汐说话」：带滚动上下文的完整生成链路。
 
     使用固定触发（mention=被点名）与真实人设/心情/自我记忆/关系；
     对话记录在内存滚动保留（每会话 24 条），并摘要写入自我记忆。
@@ -3959,12 +3967,12 @@ def _is_mentioned(event: MessageEvent, text: str) -> bool:
     if event.is_tome():
         return True
     # 消息 @ 了别人（而非机器人）时，这句话是在跟对方说；此时正文即使出现角色名，
-    # 也只是第三方提及（如「@小明 Yuna刚才说的」），不能当成在跟机器人说话，
+    # 也只是第三方提及（如「@小明 清汐刚才说的」），不能当成在跟机器人说话，
     # 避免把「别人 @ 别人」的对话误判为在叫自己。
     if _at_others(event):
         return False
     # 「回复」了别人的消息（带引用/回复段）且没 @ 机器人时，同样是在跟对方说话，
-    # 正文里的角色名（如「我家Yuna」）只是第三人称提及，不能当成在叫自己。
+    # 正文里的角色名（如「我家清汐」）只是第三人称提及，不能当成在叫自己。
     # OneBot 解析被回复消息后会把 reply 段从 event.message 里删掉，所以优先用
     # event.reply 判断；get_msg 失败时 reply 段可能仍留在消息里，再退回扫描兜底。
     if event.reply is not None or any(
@@ -5281,7 +5289,7 @@ def _apply_alias(qq: str, target: str, alias: str) -> bool:
 
 # ---------- 回复 ----------
 def _strip_speaker_prefix(text: str) -> str:
-    """剥掉 LLM 回复中误加的说话人标记（如 [QQ号 xxx（昵称）]: 或 [芸Yuna（你）]:）。
+    """剥掉 LLM 回复中误加的说话人标记（如 [QQ号 xxx（昵称）]: 或 [芸清汐（你）]:）。
 
     这些标记可能出现在开头，也可能因 LLM 续写“自问自答”而出现在中间；
     这里按标记切分，只保留第一段真正的回复，丢弃后续续写内容。
@@ -5595,7 +5603,7 @@ async def _generate(
             "\n\n【引用内容】用户这条消息引用了（回复了）下面这条别人发的消息，"
             "这是用户针对它发的言，不是别人正在对你说的话。"
             "用户这句话里的「你」「您」等第二人称，指的都是被引用的那个人，绝不是你；"
-            "正文里若提到「我家Yuna」「芸Yuna」等你的名字，也只是用户对别人提起你"
+            "正文里若提到「我家清汐」「芸清汐」等你的名字，也只是用户对别人提起你"
             "（第三人称），并不是在跟你说话，更不要跳出来替自己辩解或接话。"
             "请结合被引用消息的发送人、发送时间与内容（文字/图片/表情）理解用户的"
             "提问与意图，尤其当用户问「这是谁」「这是什么」时，要针对被引用的内容"

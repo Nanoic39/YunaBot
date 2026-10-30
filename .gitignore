@@ -4,9 +4,7 @@
 !.env.example
 config/*
 !config/README.md
-!config/character.txt
 !config/character.example.txt
-!config/growth_persona.json
 !config/growth_persona.example.json
 
 # 运行时数据
