@@ -4087,6 +4087,8 @@ def create_app(driver, root: Path = ROOT):
                     'url': media_url(rel) + f'&v={stat.st_mtime_ns}',
                 })
                 categories[category] = categories.get(category, 0) + 1
+        files_total = len(files)
+        files = files[:240]
         rejected = sum(1 for v in learned.values() if isinstance(v, dict) and v.get('status') == 'rejected')
         saved = sum(1 for v in learned.values() if isinstance(v, dict) and v.get('status') == 'saved')
         learnable = sum(1 for v in learned.values() if isinstance(v, dict) and v.get('status') == 'learnable')
@@ -4096,7 +4098,13 @@ def create_app(driver, root: Path = ROOT):
             for path in sorted(REJECTED_EMOTE_DIR.rglob('*')):
                 if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                digest = hashlib.sha1(path.read_bytes()).hexdigest()
+                # 拒绝区可能有几十万字节/上千个文件；文件名通常就是 sha1。
+                # 只有非哈希文件名才读内容，避免每次打开表情页把磁盘读满。
+                stem = path.stem
+                if re.fullmatch(r"[0-9a-fA-F]{40}", stem):
+                    digest = stem.lower()
+                else:
+                    digest = hashlib.sha1(path.relative_to(CHAT_DIR).as_posix().encode()).hexdigest()
                 meta = learned.get(digest) if isinstance(learned.get(digest), dict) else {}
                 if not meta:
                     meta = by_hash.get(digest) if isinstance(by_hash.get(digest), dict) else {}
@@ -4206,7 +4214,8 @@ def create_app(driver, root: Path = ROOT):
                 'animated': rel_meta.lower().endswith(('.gif', '.webp')),
                 'thumb': thumb, 'url': url, 'no_file': not bool(rel_meta),
             })
-        return {'files': files, 'total_size': total_size,
+        learnable_items = learnable_items[:120]
+        return {'files': files, 'files_total': files_total, 'total_size': total_size,
                 'managed_total': managed_total,
                 'categories': [{'label': k, 'count': v}
                                for k, v in sorted(categories.items(), key=lambda r: -r[1])],
@@ -4276,7 +4285,7 @@ def create_app(driver, root: Path = ROOT):
         ]
         generated = 0
         failed = 0
-        for path in paths[:800]:
+        for path in paths[:40]:
             thumb = await run_in_threadpool(media.thumbnail, path, body.width)
             if thumb is None:
                 failed += 1
@@ -4284,7 +4293,7 @@ def create_app(driver, root: Path = ROOT):
                 generated += 1
         audit(request, '预热图片缓存', f'{generated} 张 · 宽度 {body.width}')
         return {'ok': True, 'generated': generated, 'failed': failed,
-                'total': len(paths[:800]), **media.stats()}
+                'total': len(paths[:40]), **media.stats()}
 
     # ---------- 数据备份与恢复 ----------
 

@@ -6413,12 +6413,12 @@ async def _respond(
                                     quoted_msg_id,
                                     "image",
                                 ),
-                                timeout=45,
+                                timeout=25,
                             )
                         )
                     else:
                         gen_images = await asyncio.wait_for(
-                            _prepare_vision_images(images), timeout=35
+                            _prepare_vision_images(images), timeout=20
                         )
                 except asyncio.TimeoutError:
                     # 视觉接口卡住时不能把整轮 @ 拖成几分钟没有回复。

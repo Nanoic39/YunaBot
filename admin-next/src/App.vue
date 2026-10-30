@@ -342,13 +342,8 @@ async function loadRelations() {
 
 async function loadEmotes() {
   try {
+    // 不自动预热缩略图：几百张图会在打开面板时同时生成/传输，挤爆带宽。
     emotes.value = await request('chat/emotes');
-    if (!emoteWarmed.value && (emotes.value.files || []).length) {
-      emoteWarmed.value = true;
-      request('media/warm', { method: 'POST', body: JSON.stringify({ width: 360 }) })
-        .then(() => loadEmotes())
-        .catch(() => {});
-    }
   } catch (error) { toast(error.message); }
 }
 
@@ -356,7 +351,7 @@ async function warmEmotes() {
   emoteBusy.value = true;
   try {
     const result = await request('media/warm', { method: 'POST', body: JSON.stringify({ width: 360 }) });
-    toast(`已预热 ${result.generated || 0} 张缩略图`);
+    toast(`已预热前 ${result.generated || 0} 张缩略图`);
     await loadEmotes();
   } catch (error) { toast(error.message); }
   finally { emoteBusy.value = false; }
@@ -365,19 +360,19 @@ async function warmEmotes() {
 const filteredEmotes = computed(() => {
   const q = emoteQuery.value.trim().toLowerCase();
   return (emotes.value.files || []).filter((file) => (!emoteCategory.value || file.category === emoteCategory.value)
-    && (!q || `${file.category} ${file.label} ${file.path}`.toLowerCase().includes(q))).slice(0, 160);
+    && (!q || `${file.category} ${file.label} ${file.path}`.toLowerCase().includes(q))).slice(0, 60);
 });
 
 const rejectedManagedEmotes = computed(() => {
   const q = emoteQuery.value.trim().toLowerCase();
   return (emotes.value.managed || []).filter((item) => item.status === 'rejected' && (!q
-    || `${item.label || ''} ${item.reason || ''} ${item.status || ''}`.toLowerCase().includes(q)));
+    || `${item.label || ''} ${item.reason || ''} ${item.status || ''}`.toLowerCase().includes(q))).slice(0, 60);
 });
 
 const learnableManagedEmotes = computed(() => {
   const q = emoteQuery.value.trim().toLowerCase();
   return (emotes.value.learnable_items || emotes.value.managed || []).filter((item) => item.status === 'learnable' && (!q
-    || `${item.label || ''} ${item.reason || ''} ${item.status || ''} ${item.manual_note || ''}`.toLowerCase().includes(q)));
+    || `${item.label || ''} ${item.reason || ''} ${item.status || ''} ${item.manual_note || ''}`.toLowerCase().includes(q))).slice(0, 60);
 });
 
 function openEmotePreview(item, type = 'owned') {
@@ -1524,7 +1519,7 @@ onMounted(() => {
           <div class="panel-body">
             <div class="emote-toolbar">
               <div class="emote-tabs">
-                <button :class="{active: emoteTab === 'owned'}" @click="emoteTab = 'owned'">已拥有 <span>{{ emotes.files?.length || 0 }}</span></button>
+                <button :class="{active: emoteTab === 'owned'}" @click="emoteTab = 'owned'">已拥有 <span>{{ emotes.files_total || emotes.files?.length || 0 }}</span></button>
                 <button :class="{active: emoteTab === 'rejected'}" @click="emoteTab = 'rejected'">拒绝学习 <span>{{ emotes.rejected || 0 }}</span></button>
                 <button :class="{active: emoteTab === 'learnable'}" @click="emoteTab = 'learnable'">可学习 <span>{{ emotes.learnable || 0 }}</span></button>
               </div>
@@ -1532,10 +1527,10 @@ onMounted(() => {
             </div>
 
             <div v-if="emoteTab === 'owned'">
-              <p class="small muted" style="margin:0 0 10px">已拥有会用于聊天；移入拒绝学习后不再主动使用。</p>
+              <p class="small muted" style="margin:0 0 10px">已拥有会用于聊天；列表最多加载 60 张，搜索和分类仍可用。</p>
               <div class="emote-grid">
                 <figure v-for="file in filteredEmotes" :key="file.path" class="emote-card">
-                  <img :src="file.animated ? file.url : file.thumb" :alt="file.label || file.category" loading="lazy" @click="openEmotePreview(file, 'owned')" />
+                  <img :src="file.thumb || file.url" :alt="file.label || file.category" loading="lazy" @click="openEmotePreview(file, 'owned')" />
                   <figcaption @click="openEmotePreview(file, 'owned')">
                     <strong>{{ file.label || file.category || file.path }}</strong>
                     <small>{{ file.category }} · {{ Math.round((file.size || 0) / 1024) }} KB</small>
@@ -1550,7 +1545,7 @@ onMounted(() => {
               <p class="small muted" style="margin:0 0 10px">拒绝学习不会参与聊天；可以恢复为已拥有，或加入可学习并记录下次判断提示。</p>
               <div class="emote-grid managed">
                 <figure v-for="item in rejectedManagedEmotes" :key="item.hash + (item.path || '')" class="emote-card">
-                  <img v-if="item.thumb" :src="item.animated ? item.url : item.thumb" :alt="item.label" loading="lazy" @click="openEmotePreview(item, 'rejected')" />
+                  <img v-if="item.thumb" :src="item.thumb || item.url" :alt="item.label" loading="lazy" @click="openEmotePreview(item, 'rejected')" />
                   <div v-else class="empty" style="height:110px;display:grid;place-items:center;font-size:10px" @click="openEmotePreview(item, 'rejected')">无图片文件</div>
                   <figcaption>
                     <strong>{{ item.label || '未命名' }}</strong>
@@ -1569,7 +1564,7 @@ onMounted(() => {
               <p class="small muted" style="margin:0 0 10px">可学习会在相同图片再次出现时，带着人工提示重新判断；不会直接进入已拥有。</p>
               <div class="emote-grid managed">
                 <figure v-for="item in learnableManagedEmotes" :key="item.hash + (item.path || '')" class="emote-card">
-                  <img v-if="item.thumb" :src="item.animated ? item.url : item.thumb" :alt="item.label" loading="lazy" @click="openEmotePreview(item, 'learnable')" />
+                  <img v-if="item.thumb" :src="item.thumb || item.url" :alt="item.label" loading="lazy" @click="openEmotePreview(item, 'learnable')" />
                   <div v-else class="empty" style="height:110px;display:grid;place-items:center;font-size:10px" @click="openEmotePreview(item, 'learnable')">无图片文件</div>
                   <figcaption>
                     <strong>{{ item.label || '未命名' }}</strong>
