@@ -82,6 +82,16 @@ def game_phase(row,now=None):
 def phase_name(row,now=None):
  return {'signup':'正在报名','active':'正在进行','ended':'已结束','cancelled':'已取消'}.get(game_phase(row,now),'—')
 
+def _same_game_name(a: str, b: str) -> bool:
+    """判断两个游戏名是否指同一款（含 L4D2/求生之路别名）。"""
+    aa=re.sub(r'[\s@/、,，|·\-—_]+','',str(a or '').lower())
+    bb=re.sub(r'[\s@/、,，|·\-—_]+','',str(b or '').lower())
+    if not aa or not bb:return False
+    if aa==bb or aa in bb or bb in aa:return True
+    aliases=('l4d2','l4d','left4dead','leftdead','求生之路')
+    return any(x in aa for x in aliases) and any(x in bb for x in aliases)
+
+
 def normalize_same_evening_start(start, text, now=None):
     """把“今晚八点”被模型误算成明天时拉回今天；明确说明天/明晚时不动。"""
     now=time.time() if now is None else float(now)
@@ -104,7 +114,7 @@ class GameStore:
  def __init__(self,path,clock=time.time):
   self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True);self.clock=clock
   with self.db() as d:
-   d.executescript('''CREATE TABLE IF NOT EXISTS games(id INTEGER PRIMARY KEY,account TEXT,gid TEXT,host TEXT,game TEXT,start REAL,capacity INTEGER,waitlist_capacity INTEGER DEFAULT 0,state TEXT DEFAULT 'open',reminded INTEGER DEFAULT 0,trigger_rules TEXT DEFAULT '[]',triggered INTEGER DEFAULT 0,triggered_at REAL DEFAULT 0,triggered_text TEXT DEFAULT '');
+   d.executescript('''CREATE TABLE IF NOT EXISTS games(id INTEGER PRIMARY KEY,account TEXT,gid TEXT,host TEXT,game TEXT,start REAL,capacity INTEGER,waitlist_capacity INTEGER DEFAULT 0,state TEXT DEFAULT 'open',reminded INTEGER DEFAULT 0,trigger_rules TEXT DEFAULT '[]',triggered INTEGER DEFAULT 0,triggered_at REAL DEFAULT 0,triggered_text TEXT DEFAULT '',short_triggered INTEGER DEFAULT 0,short_triggered_at REAL DEFAULT 0,short_triggered_text TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS members(game_id INTEGER,qq TEXT,name TEXT,status TEXT DEFAULT 'formal',PRIMARY KEY(game_id,qq));
 CREATE TABLE IF NOT EXISTS game_notes(game_id INTEGER,note_key TEXT,note_value TEXT,PRIMARY KEY(game_id,note_key));
 CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TEXT,PRIMARY KEY(account,gid,message));''')
@@ -116,6 +126,9 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
   if 'triggered' not in gcols:d.execute('ALTER TABLE games ADD COLUMN triggered INTEGER DEFAULT 0')
   if 'triggered_at' not in gcols:d.execute('ALTER TABLE games ADD COLUMN triggered_at REAL DEFAULT 0')
   if 'triggered_text' not in gcols:d.execute("ALTER TABLE games ADD COLUMN triggered_text TEXT DEFAULT ''")
+  if 'short_triggered' not in gcols:d.execute('ALTER TABLE games ADD COLUMN short_triggered INTEGER DEFAULT 0')
+  if 'short_triggered_at' not in gcols:d.execute('ALTER TABLE games ADD COLUMN short_triggered_at REAL DEFAULT 0')
+  if 'short_triggered_text' not in gcols:d.execute("ALTER TABLE games ADD COLUMN short_triggered_text TEXT DEFAULT ''")
   mcols={r[1] for r in d.execute('PRAGMA table_info(members)')}
   if 'status' not in mcols:d.execute("ALTER TABLE members ADD COLUMN status TEXT DEFAULT 'formal'")
  @contextmanager
@@ -142,6 +155,9 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
    r['triggered']=bool(r.get('triggered'))
    r['triggered_at']=float(r.get('triggered_at') or 0)
    r['triggered_text']=str(r.get('triggered_text') or '')
+   r['short_triggered']=bool(r.get('short_triggered'))
+   r['short_triggered_at']=float(r.get('short_triggered_at') or 0)
+   r['short_triggered_text']=str(r.get('short_triggered_text') or '')
   return rows
  def _card_row(self,d,rid,account=None):
   if account is None:raw=d.execute('SELECT * FROM games WHERE id=?',(rid,)).fetchone()
@@ -231,10 +247,13 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
   hour,minute=(int(x) for x in str(rule.get('time') or '00:00').split(':'))
   base=datetime.fromtimestamp(float(row.get('start') or 0),ZoneInfo('Asia/Shanghai'))
   return datetime(base.year,base.month,base.day,hour,minute,tzinfo=ZoneInfo('Asia/Shanghai')).timestamp()
- def _trigger_matches(self,row,rule,now,count):
-  at=self._trigger_time(row,rule)
-  if int(rule.get('min_players') or 0)>count:return False
-  return now<at if rule.get('when')=='before' else now>=at
+ def _trigger_state(self,row,rule,now,count):
+  """full=人齐可开；short=到点但人未齐；空=还没到判断时间。"""
+  at=self._trigger_time(row,rule);need=int(rule.get('min_players') or 0)
+  before=rule.get('when')=='before'
+  if need>count:
+   return 'short' if now>=at else ''
+  return 'full' if (now<at if before else now>=at) else ''
  def trigger_due(self,account):
   now=self.clock();out=[]
   with self.db() as d:
@@ -245,13 +264,24 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
     except (TypeError,ValueError):continue
     if not isinstance(rules,list):continue
     count=self._counts(d,row['id'])[0]
-    hit=next((rule for rule in rules if isinstance(rule,dict) and self._trigger_matches(row,rule,now,count)),None)
-    if not hit:continue
-    label=trigger_rule_text(hit)
-    changed=d.execute("UPDATE games SET triggered=1,triggered_at=?,triggered_text=? WHERE id=? AND triggered=0",(now,label,row['id'])).rowcount
-    if changed:
-     row.update(triggered=1,triggered_at=now,triggered_text=label)
-     out.append(row)
+    full=None;short=None
+    for rule in rules:
+     if not isinstance(rule,dict):continue
+     state=self._trigger_state(row,rule,now,count)
+     if state=='full':full=rule;break
+     if state=='short' and short is None:short=rule
+    if full:
+     label=trigger_rule_text(full)
+     changed=d.execute("UPDATE games SET triggered=1,triggered_at=?,triggered_text=? WHERE id=? AND triggered=0",(now,label,row['id'])).rowcount
+     if changed:
+      row.update(triggered=1,triggered_at=now,triggered_text=label,_short_trigger=False)
+      out.append(row)
+    elif short and not row.get('short_triggered'):
+     label=trigger_rule_text(short)
+     changed=d.execute("UPDATE games SET short_triggered=1,short_triggered_at=?,short_triggered_text=? WHERE id=? AND short_triggered=0",(now,label,row['id'])).rowcount
+     if changed:
+      row.update(short_triggered=1,short_triggered_at=now,short_triggered_text=label,_short_trigger=True)
+      out.append(row)
    return self._with_members(d,out) if out else []
  def _replace_notes(self,d,rid,notes):
   d.execute('DELETE FROM game_notes WHERE game_id=?',(rid,))
@@ -343,6 +373,7 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
      d.execute('INSERT INTO members VALUES(?,?,?,?)',(rid,host,host_name or host,'formal'))
    if ('start' in updates and updates['start']!=row['start']) or ('state' in updates and updates['state']!=row['state']):
     updates['reminded']=0;updates['triggered']=0;updates['triggered_at']=0;updates['triggered_text']=''
+    updates['short_triggered']=0;updates['short_triggered_at']=0;updates['short_triggered_text']=''
    if updates:d.execute('UPDATE games SET '+','.join(f'{k}=?' for k in updates)+' WHERE id=?',[*updates.values(),rid])
    if 'notes' in fields:self._replace_notes(d,rid,self._clean_notes(fields['notes']) or [])
    if 'trigger_rules' in fields:
@@ -351,7 +382,7 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
     except (TypeError,ValueError):old_rules=[]
     updates={'trigger_rules':json.dumps(rules,ensure_ascii=False)}
     if rules!=old_rules:
-     updates.update({'triggered':0,'triggered_at':0,'triggered_text':''})
+     updates.update({'triggered':0,'triggered_at':0,'triggered_text':'','short_triggered':0,'short_triggered_at':0,'short_triggered_text':''})
    if updates:d.execute('UPDATE games SET '+','.join(f'{k}=?' for k in updates)+' WHERE id=?',[*updates.values(),rid])
    if 'capacity' in fields:self._promote_waitlist(d,rid)
   return self.get(rid,account)
@@ -393,10 +424,20 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
    receipt=d.execute('SELECT result FROM receipts WHERE account=? AND gid=? AND message=?',(account,gid,message)).fetchone()
    if receipt:return receipt[0]
    action=plan.get('action');now=self.clock()
-   if action=='create':
+   if action in ('create','create_new'):
     game=str(plan.get('game') or '').strip();cap=plan.get('capacity');start=plan.get('start');wait=self._clean_waitlist(plan.get('waitlist_capacity'));trigger_rules=self._clean_trigger_rules(plan.get('trigger_rules'))
     if cap in (None,'','不限','无上限','不限人数'):cap=0
     if not game or len(game)>60 or type(cap) is not int or cap!=0 and not 2<=cap<=20 or type(start) not in (int,float) or not math.isfinite(start) or not now+60<=start<=now+30*86400:raise ValueError('请说清游戏和开始时间；正式位可以不填（默认不限），也可以填 2—20 人，时间需在未来30天内。')
+    force_new=action=='create_new' or bool(plan.get('force_new'))
+    if not force_new:
+     same=[dict(r) for r in d.execute("SELECT * FROM games WHERE account=? AND gid=? AND state='open' AND start>?",(account,gid,now-21600))]
+     same=[r for r in same if _same_game_name(r.get('game'),game)]
+     if same:
+      same=self._with_members(d,same)
+      result=(game_notice('本群已经有同款游戏的未结束车队。先看看现有局；要报名请回复「报名 #编号」，'
+                          '要另外开一支新车队请明确说「新建车队」。','开黑 · 已有对局')
+              + '\n' + game_summary(same,game))
+      d.execute('INSERT INTO receipts VALUES(?,?,?,?)',(account,gid,message,result));return result
     if d.execute("SELECT count(*) FROM games WHERE account=? AND gid=? AND host=? AND state='open' AND start>?",(account,gid,qq,now-21600)).fetchone()[0]>=3:raise ValueError('你已经有三个未结束的局啦，先处理已有的吧。')
     rid=d.execute('INSERT INTO games(account,gid,host,game,start,capacity,waitlist_capacity,trigger_rules) VALUES(?,?,?,?,?,?,?,?)',(account,gid,qq,game,start,cap,wait,json.dumps(trigger_rules,ensure_ascii=False))).lastrowid
     d.execute('INSERT INTO members VALUES(?,?,?,?)',(rid,qq,name[:60],'formal'))
@@ -579,6 +620,23 @@ def trigger_notification(row):
   segments.extend((MessageSegment.at(qq),MessageSegment.text(' ')))
  segments.append(MessageSegment.text(trigger_message(row)))
  return Message(segments)
+
+def short_trigger_notification(row):
+ """到点但人数未齐：只提醒组织者，不按“人齐可开”通知全队。"""
+ from nonebot.adapters.onebot.v11 import Message,MessageSegment
+ host=str(row.get('host') or '').strip()
+ members=row.get('members') or []
+ formal=sum(1 for m in members if str(m.get('status') or 'formal')!='waitlist')
+ cap=int(row.get('capacity') or 0)
+ cap_text=f'/{cap}' if cap else ''
+ trigger=row.get('short_triggered_text') or _game_trigger_text(row) or '约定时间'
+ text=(f"【开黑 · 人数未齐】{row.get('game') or '这局'}到点了，当前正式 {formal}{cap_text}，"
+       f"还没有达到「{trigger}」。这条只提醒组织者：要改时间、降低人数、继续等人还是取消，直接回复我。"
+       f"\n{CARD_RULE}\n当前卡片：\n" + game_card(row,show_members=True))
+ seg=[MessageSegment.at(host)] if host else []
+ seg.append(MessageSegment.text(' '+text if host else text))
+ return Message(seg)
+
 
 def reminder_message(row):
  """群提醒必须实际 @ 已报名成员；单纯发文本在 QQ 群里不会通知到人。"""

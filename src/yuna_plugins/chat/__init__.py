@@ -6144,9 +6144,10 @@ async def _route_intent(
     )
     if qq_context and 'game_sessions' in qq_context:
         prompt += ('\n可额外输出party_plan，但仅在明确向Bot要求约游戏时：'
-            '{"action":"none|clarify|list|create|join|join_waitlist|leave|cancel|waitlist","id":本群已有局ID或null,"game":"游戏名称","start":Unix秒,"capacity":正式位含组织者总人数,"waitlist_capacity":候补位数量,"trigger_rules":[{"when":"before|after","time":"HH:MM","min_players":人数}],"confidence":0到1,"evidence":"当前原文连续片段"}。'
+            '{"action":"none|clarify|list|create|create_new|join|join_waitlist|leave|cancel|waitlist","id":本群已有局ID或null,"game":"游戏名称","start":Unix秒,"capacity":正式位含组织者总人数,"waitlist_capacity":候补位数量,"trigger_rules":[{"when":"before|after","time":"HH:MM","min_players":人数}],"confidence":0到1,"evidence":"当前原文连续片段"}。'
             '默认none；普通聊天、转述、假设、对别人说的话不是约局要求。加入/退出仅操作当前发送者，不能替别人报名。'
             'create需明确游戏、未来时间、正式位2—20；依据current_time按上海时间解析，不能编造缺失字段；缺失或多局指向不清则clarify。'
+            '用户是在发起新局而不是报名已有局时选create；已有同款游戏时create会先列出现有局并询问，不会直接新建。用户明确说“新建车队/另开一队/重新开一个”才选create_new；不要因为已有同款局就把“开黑/约一局”自动当成join。'
             '用户说“21点后4人以上就开/21点前4人开，否则4人21点后开”时，把触发条件填进 trigger_rules：before/after + HH:MM + min_players，可多条组合；0 人表示到点即开。“开3个候补位/加3个替补”在已有当前局时是实际功能 waitlist：id填该局，waitlist_capacity=3，不是普通聊天；创建时也可以同时带waitlist_capacity。'
             '用户明确说“我要候补/我想替补/排个候补位/让我当替补”并指向已有局时，必须选择 join_waitlist，即使正式位没满也要进候补位，不能按普通join进正式位。'
             '用户说“今晚/今天晚上”时必须落在今天日期，不能自动顺延到第二天；只有明确说明天/明晚才放第二天。'
