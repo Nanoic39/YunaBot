@@ -6302,6 +6302,21 @@ async def _human_pause(text: str, trigger: str, started: float | None = None) ->
         await asyncio.sleep(delay)
 
 
+async def _send_split_reply(bot: Bot, event: MessageEvent, response: str, prefix=None) -> list[str]:
+    """特殊拦截回复也必须走 [[SPLIT]] 分条，不能把标记原样发给用户。"""
+    parts, *_ = _split_parts_emote(response)
+    if chat_config.chat_humanize_enabled:
+        parts = split_naturally(parts, chat_config.chat_split_probability)
+    parts = [part for part in (parts or []) if _meaningful_part(part)]
+    if not parts:
+        return []
+    await bot.send(event, (prefix or "") + MessageSegment.text(parts[0]))
+    for extra in parts[1:]:
+        await _human_pause(extra, "split", time.time())
+        await bot.send(event, MessageSegment.text(extra))
+    return parts
+
+
 async def _reply_favor_farm(bot: Bot, event: MessageEvent, gid, qq: str):
     kind = "group" if gid else "user"
     key = gid if gid else qq
@@ -6328,10 +6343,11 @@ async def _reply_favor_farm(bot: Bot, event: MessageEvent, gid, qq: str):
         except Exception:
             pass
     await _human_pause(response, "favor_farm", started)
-    await bot.send(event, response)
-    _memory.add_turn(kind, key, "assistant", "", response)
-    _append_recent(key, "assistant", "", "", response)
-    _human.record_reply(key, response)
+    parts = await _send_split_reply(bot, event, response)
+    memory_text = "\n".join(parts) if parts else response
+    _memory.add_turn(kind, key, "assistant", "", memory_text)
+    _append_recent(key, "assistant", "", "", memory_text)
+    _human.record_reply(key, memory_text)
 
 
 def _reply_prefix(event: MessageEvent, trigger: str, *, notify: bool = False):
@@ -6370,10 +6386,11 @@ async def _reply_sensitive(bot: Bot, event: MessageEvent, gid, qq: str):
         except Exception:
             pass
     await _human_pause(response, "sensitive", started)
-    await bot.send(event, _reply_prefix(event, "mention") + response)
-    _memory.add_turn(kind, key, "assistant", "", response)
-    _append_recent(key, "assistant", "", "", response)
-    _human.record_reply(key, response)
+    parts = await _send_split_reply(bot, event, response, _reply_prefix(event, "mention"))
+    memory_text = "\n".join(parts) if parts else response
+    _memory.add_turn(kind, key, "assistant", "", memory_text)
+    _append_recent(key, "assistant", "", "", memory_text)
+    _human.record_reply(key, memory_text)
 
 
 async def _respond(
@@ -7262,7 +7279,13 @@ async def _handle_group(
     if await _handle_emote_admin(bot, event, text):
         return
 
-    if targeting.get("direct_to_bot") and _detect_favor_farming(qq, text):
+    if (
+        targeting.get("direct_to_bot")
+        and not images
+        and not forward_context
+        and not quote_context
+        and _detect_favor_farming(qq, text)
+    ):
         _penalize_favorability(qq, chat_config.chat_favor_farm_penalty, reason='刷好感', text=text, context=list(_recent.get(gid, [])), group=gid)
         logger.info(
             f"[chat] 检测到刷好感 gid={gid} qq={qq} "
@@ -7432,7 +7455,12 @@ async def _handle_private(
     except Exception as error:
         logger.debug(f"[social] 记录资料卡失败：{error}")
 
-    if _detect_favor_farming(qq, text):
+    if (
+        not images
+        and not forward_context
+        and not quote_context
+        and _detect_favor_farming(qq, text)
+    ):
         _penalize_favorability(qq, chat_config.chat_favor_farm_penalty, reason='刷好感', text=text, context=list(_recent.get(qq, [])))
         await _reply_favor_farm(bot, event, None, qq)
         return
