@@ -450,6 +450,8 @@ _recall_recent: dict[str, dict] = {}  # key -> 最近撤回 {qq, text, time, msg
 _consolidate_tasks: dict[str, asyncio.Task] = {}  # key -> 后台固化任务（每 key 单飞）
 _emote_learn_ts: dict[str, deque] = {}  # 群 -> 最近表情包判断时间戳（限流用）
 _emote_learn_tasks: set[asyncio.Task] = set()  # 后台表情包学习任务，持有引用防被回收
+_web_sticker_tasks: set[asyncio.Task] = set()  # 联网找表情包任务
+_web_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次请求时间
 _emote_hash_index: dict[str, dict] | None = None  # 图片 hash -> 判断/收藏记录（懒加载）
 _emote_audit_task: asyncio.Task | None = (
     None  # 人工触发的已收藏表情审查任务（同时只跑一个）
@@ -6041,7 +6043,7 @@ async def _route_intent(
         if (u.get("nickname") or "").strip()
     ]
     prompt = (
-        "判断用户这句话的意图，四选一：\n"
+        "判断用户这句话的意图，五选一：\n"
         "1) set_alias：用户在设置你对某人的称呼。如“以后叫我xxx”“叫我xxx”“你可以称呼我为xxx”"
         '（target 填 "self"）；或“称呼QQ号123为yyy”（target 填 "123"）。alias 填称呼内容。\n'
         "2) recall：用户在询问其他群聊、其他用户，或某个具体的人（用昵称/称呼指代）的近期情况或记忆。"
@@ -6050,6 +6052,12 @@ async def _route_intent(
         "3) usage_stats：用户在打听调用统计。如“这个群里调用次数最多的几个人”“谁烧的token/花费最多”"
         "“你被调用了多少次/用了多少token”。target 和 alias 都填 null。\n"
         "4) chat：普通聊天。target 和 alias 都填 null。\n"
+        "5) web_sticker：用户要求你从网上找、下载或发一张表情包/贴纸/meme图。"
+        "用户可能用谐音、错字、昵称或只有群友懂的梗语言指代角色/作品，例如把某个角色叫成别的外号；"
+        "必须结合上下文和公开知识还原，不能按字面乱搜，也不能用固定词表。"
+        'sticker_subject 填还原后的标准角色/作品/主体名；sticker_queries 填2到4个公开图片检索短词'
+        '（可以包含中文/日文/英文的表情包、スタンプ、sticker 写法）；并结合上下文给出把握。'
+        "不是明确要你找图就不要选这一项。\n"
     )
     if user_hints:
         prompt += "你掌握的用户昵称索引（昵称=QQ）：\n" + "\n".join(user_hints) + "\n"
@@ -6057,8 +6065,9 @@ async def _route_intent(
         prompt += "你掌握的其他记忆清单：\n" + "\n".join(map_lines) + "\n"
     prompt += (
         f"\n当前用户 QQ 号：{qq}\n用户的话：{text}\n"
-        '只输出 JSON：{"intent": "set_alias"|"recall"|"usage_stats"|"chat", '
-        '"target": "self"或"<QQ号>"或"group:编号"或"user:编号"或null, "alias": "称呼内容"或null}。'
+        '只输出 JSON：{"intent": "set_alias"|"recall"|"usage_stats"|"chat"|"web_sticker", '
+        '"target": "self"或"<QQ号>"或"group:编号"或"user:编号"或null, "alias": "称呼内容"或null, '
+        '"sticker_subject": "标准主体名"或null, "sticker_queries": ["检索短词"], "sticker_style": "风格"或null}。'
     )
     if qq_context and 'game_sessions' in qq_context:
         prompt += ('\n可额外输出party_plan，但仅在明确向Bot要求约游戏时：'
@@ -6110,7 +6119,7 @@ async def _route_intent(
     if not isinstance(obj, dict):
         return None
     intent = obj.get("intent")
-    if intent not in ("set_alias", "recall", "usage_stats", "chat"):
+    if intent not in ("set_alias", "recall", "usage_stats", "chat", "web_sticker"):
         return None
     target = obj.get("target")
     logger.info(
@@ -6124,6 +6133,9 @@ async def _route_intent(
         "qq_plan": obj.get("qq_plan") if intent == "chat" else None,
         "party_plan": obj.get("party_plan") if intent == "chat" else None,
         "pragmatics": obj.get("pragmatics") if intent == "chat" else None,
+        "sticker_subject": obj.get("sticker_subject") if intent == "web_sticker" else None,
+        "sticker_queries": obj.get("sticker_queries") if intent == "web_sticker" else None,
+        "sticker_style": obj.get("sticker_style") if intent == "web_sticker" else None,
     }
 
 
@@ -6457,6 +6469,111 @@ async def _reply_sensitive(bot: Bot, event: MessageEvent, gid, qq: str):
     _human.record_reply(key, memory_text)
 
 
+def _web_sticker_plan_from_intent(intent: dict, text: str) -> dict:
+    subject = str(intent.get("sticker_subject") or "").strip()
+    queries = [str(x).strip() for x in (intent.get("sticker_queries") or []) if str(x).strip()]
+    if subject:
+        for suffix in (" 表情包", " スタンプ", " sticker"):
+            q = (subject + suffix).strip()
+            if q not in queries:
+                queries.append(q)
+    return {
+        "canonical": subject,
+        "aliases": [],
+        "queries": queries[:6],
+        "style": str(intent.get("sticker_style") or "")[:80],
+        "confidence": 0.0,
+    }
+
+
+async def _run_web_sticker(bot: Bot, event: MessageEvent, gid, qq: str, text: str,
+                           plan: dict, reply_prefix, ack_sent: bool = False):
+    from . import web_stickers
+    try:
+        vision_llm, vision = _vision_client(gid, "sticker")
+        if not vision.get("enabled") or not vision_llm or not vision_llm.available:
+            vision_llm = None
+        if plan is None:
+            plan = await web_stickers.plan_request(_utility_llm(), text, list(_recent.get(str(gid or qq), []))[-8:])
+        async def lookup_web(query: str) -> str:
+            if not chat_config.chat_web_search_enabled:
+                return ""
+            rows = await web_search(
+                query,
+                api_base=chat_config.chat_web_search_api_base or chat_config.chat_llm_api_base,
+                api_key=chat_config.chat_llm_api_key,
+                count=min(5, int(chat_config.chat_web_search_max_results)),
+                timeout=min(12, int(chat_config.chat_web_search_timeout)),
+                ori_question=query,
+            )
+            return format_web_context(rows, query)
+        if plan:
+            plan = await web_stickers.refine_plan(_utility_llm(), plan, lookup_web)
+        found = await asyncio.wait_for(
+            web_stickers.find_sticker(_utility_llm(), vision_llm, text, plan=plan),
+            timeout=75,
+        )
+        if not found:
+            await bot.send(event, reply_prefix + MessageSegment.text(
+                "没找到能发的图…可以再补一句作品名或想要的表情风格吗"
+            ))
+            return
+        data = found["data"]
+        ext = found.get("ext") or ".png"
+        digest = hashlib.sha1(data).hexdigest()
+        MISC_EMOJI_DIR.mkdir(parents=True, exist_ok=True)
+        subject = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "", str(found.get("subject") or "表情"))[:20] or "表情"
+        path = MISC_EMOJI_DIR / f"web_{subject}_{digest[:8]}{ext}"
+        path.write_bytes(data)
+        try:
+            index = _emote_hash_index_load()
+            index[digest] = {
+                "status": "saved", "category": "misc", "label": subject,
+                "path": str(path.relative_to(PLUGIN_DIR)), "time": int(time.time()),
+                "source": "web", "query": str(found.get("query") or "")[:100],
+            }
+            _emote_hash_save()
+        except Exception as error:
+            logger.debug(f"[web-sticker] 记录收藏失败：{error}")
+        await bot.send(event, reply_prefix + MessageSegment.image(f"file://{path}"))
+        note = f"〔联网表情包：{subject}〕"
+        _memory.add_turn("group" if gid else "user", gid or qq, "assistant", "", note)
+        _append_recent(gid or qq, "assistant", "", "", note)
+    except asyncio.TimeoutError:
+        logger.warning("[web-sticker] 联网找图超时")
+        await bot.send(event, reply_prefix + MessageSegment.text("找图等太久了，先没找到合适的…"))
+    except Exception as error:
+        logger.warning(f"[web-sticker] 联网找图失败：{error}")
+        try:
+            await bot.send(event, reply_prefix + MessageSegment.text("网上找图这边出了点问题，晚点再试试～"))
+        except Exception:
+            pass
+
+
+async def _maybe_handle_web_sticker(bot: Bot, event: MessageEvent, gid, qq: str,
+                                     text: str, intent: dict, reply_prefix) -> bool:
+    """若意图是联网找表情包：立即短确认，后台检索并发送。"""
+    if not intent or intent.get("intent") != "web_sticker":
+        return False
+    key = str(gid or qq)
+    now = time.time()
+    if now - _web_sticker_last.get(key, 0) < 15:
+        return False
+    _web_sticker_last[key] = now
+    plan = _web_sticker_plan_from_intent(intent, text)
+    if not plan.get("queries"):
+        plan = None
+    ack = "哥哥稍等，我去网上找找～" if str(qq) == str(_brother_qq) else "稍等，我去网上找找～"
+    try:
+        await bot.send(event, reply_prefix + MessageSegment.text(ack))
+    except Exception as error:
+        logger.debug(f"[web-sticker] 确认消息发送失败：{error}")
+    task = asyncio.create_task(_run_web_sticker(bot, event, gid, qq, text, plan, reply_prefix, True))
+    _web_sticker_tasks.add(task)
+    task.add_done_callback(_web_sticker_tasks.discard)
+    return True
+
+
 async def _respond(
     bot: Bot,
     event: MessageEvent,
@@ -6653,6 +6770,8 @@ async def _respond(
         qq_context['audience'] = audience
         qq_context['constraints'] = qq_constraints
         intent = await _route_intent(_utility_llm(), kind, key, qq, text, qq_context=qq_context)
+        if await _maybe_handle_web_sticker(bot, event, gid, qq, text, intent or {}, reply_prefix):
+            return
         qq_plan = intent.get('qq_plan') if intent else None
         if party and party.enabled() and intent and intent.get('party_plan'):
             party_reply = await party.execute_plan(bot,event,intent['party_plan'])
