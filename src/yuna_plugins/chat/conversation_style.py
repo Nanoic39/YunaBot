@@ -41,37 +41,42 @@ def meme_hint(analysis):
         return ("【本轮语义判断】这更像普通打错字/输入失误，不是故意玩梗；"
                 "先按能还原的意思正常回应，不要把错字当笑点，也不要编造梗的出处。")
     if mode == "uncertain":
-        return ("【本轮语义判断】当前可能是在玩梗、也可能只是字面或打错字，不能确定；"
-                "先顺着语气轻接或问一句具体所指，不要背百科、不要装懂出处，也不要把不确定的谐音硬解释成某个梗。")
-    term = analysis.get("recognized_term")
-    meaning = analysis.get("meaning")
-    label = f"“{term}”" if term else "这个说法"
+        return ("【本轮语义判断】当前可能是在玩梗，也可能只是字面；先按对话气氛给一个自然反应，"
+                "不要把不确定的谐音硬解释成某个梗，不要背百科或编造出处。"
+                "除非确实接不上，不要用“什么意思/哪句”占满整条回复，最多轻问半句。")
+    wants = bool(analysis.get("wants_explanation"))
     strategy_text = {
-        "play_along": "顺着对方的情绪/动作接，再补半句具体反应",
+        "play_along": "接着对方的话往下说，给一个具体的反应或继续玩",
         "deadpan": "一本正经地配合离谱，不戳破",
         "self_deprecate": "先自嘲或认领这个说法",
-        "callout": "点破具体哪里离谱/哪里典，但不攻击人",
-        "ask_back": "轻问一句具体所指，不要连续追问",
-        "ignore": "不必强行接梗，正常回应",
+        "callout": "顺着离谱点吐槽一句，但不解释梗",
+        "ask_back": "只在确实接不上时轻问半句，不要连续追问",
+        "ignore": "不必强行接梗，自然回应",
     }.get(strategy, "先给具体反应")
     variant = analysis.get("variant_type")
     lines = [
-        "【本轮玩梗判断】当前更像是在玩梗/接梗，不是字面求助。",
-        f"识别到的说法：{label}" + (f"；在当前语境的意思：{meaning}" if meaning else "；具体出处不确定，不要编造。"),
-        f"接法：{strategy_text}。先接住当前这句话，不要先解释“这是一个梗”，不要背百科，不要突然给生活/理财/操作建议，也不要用“什么事/哪句/什么意思”当整条回复。"
-        + ("如果这是纯情绪/起哄，整条回复必须是具体反应而不是问句。" if strategy == "ask_back" and variant in ("none", "unknown") else ""),
+        "【本轮玩梗判断】对方是在跟你玩/接梗，不是在考你或求科普。"
+        "把梗当成你们已经共享的语言，直接用角色自己的话接住、延续、反转或自嘲。",
+        "不要先解释、定义、标注“这是梗/你在玩梗”，不要报百科、出处或含义，"
+        "也不要用“你说的是……”开头；直接把梗自然用在对话里。",
+        f"接法：{strategy_text}。",
     ]
+    if wants:
+        lines.append("对方明确在问含义/出处：可以简短说明，但仍用角色口吻，不要长篇百科。")
+        if analysis.get("meaning"):
+            lines.append("语境含义参考：" + str(analysis.get("meaning"))[:180])
+    else:
+        lines.append("对方没有明确问含义/出处，所以绝不要主动解释；把相关角色/作品/台词当成自然语境带过。")
     if variant == "lyric":
         lines.append(
-            "这是歌词/台词引用：优先接下一句、点出歌名/作品并顺着哼，或者用同一段的节奏回应；"
-            "绝不能把它当天气/日常话题，不要问“哪首歌”，不要解释歌词意思。"
-            + (f"作品：{term}。" if term else "不确定歌名就只顺着哼，不要编造歌名或下一句。")
+            "这是歌词/台词引用：优先接下一句、用同一节奏哼回去，或自然点一下作品；"
+            "不要主动报歌名/出处，除非对方明确问。不要把它当天气/日常话题，不要问“哪首歌”。"
         )
     elif variant == "reference":
-        lines.append("这是作品/典故引用：点出它对应的作品或语境，再顺着接；不确定就只接语气，不要编造出处。")
+        lines.append("这是作品/典故引用：用作品语境自然接，不要科普；不确定就只接语气。")
     if variant in ("none", "unknown") and strategy in ("play_along", "deadpan", "self_deprecate"):
-        lines.append("【硬性】这是纯情绪/起哄，没有具体问题：整条回复必须是具体反应，不要用问句，不要要求对方解释笑点，也不要只说“怎么了”。")
-    if analysis.get("reply_goal"):
+        lines.append("【硬性】这是纯情绪/起哄，没有具体问题：整条回复必须是具体反应，不要用问句，不要要求对方解释笑点。")
+    if analysis.get("reply_goal") and (wants or not any(x in str(analysis.get("reply_goal")) for x in ("解释", "含义", "出处", "说明", "科普"))):
         lines.append("本轮目标：" + analysis["reply_goal"])
     if analysis.get("reply_seed"):
         lines.append("可参考的短句（不要照抄）：" + analysis["reply_seed"])

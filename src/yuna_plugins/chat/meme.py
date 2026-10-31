@@ -48,7 +48,8 @@ _ANALYZE_SYSTEM = """你是中文群聊的语用分析师，只输出 JSON，不
 - 如果当前消息引用了某条内容，必须结合引用内容判断“看看/继续/然后呢”等是不是在要求展示/继续，不能脱离引用把它当梗。
 候选梗库只是语义参考，不是命中表。没有合适候选时 recognized_term/reference_id 必须为 null，不能编造出处。
 不知道具体梗时，needs_web 必须为 true；只要 mode=uncertain 且原文不超过 40 字、或 variant_type=lyric/reference、或你觉得可能是作品引用，就主动给 web_query。web_query 只能保留公开短语，不能包含昵称、QQ、群号、完整私聊原文。
-回复策略要选：literal（正常回答）、play_along（顺着接）、deadpan（一本正经配合）、self_deprecate（自嘲/认领）、callout（点破离谱点）、ask_back（轻问一句）、ignore（不接）。
+回复策略要选：literal（正常回答）、play_along（顺着接）、deadpan（一本正经配合）、self_deprecate（自嘲/认领）、callout（顺着离谱点吐槽，不解释梗）、ask_back（只在确实无法接时才轻问一句）、ignore（不接）。
+大多数用户玩梗是在邀请你一起玩，不是求解释、求定义或求你指出“你在玩梗”。平时 reply_goal 要写成自然对话效果，不要写成解释含义/出处；只有用户明确问“什么意思/出自哪/什么梗/解释一下”时，才把 wants_explanation 设为 true。
 如果是 lyric/reference，reply_goal 要写成“接下一句/点出作品并顺着哼”，不能写成问天气、问日常或解释百科。
 只输出这个 JSON 对象：
 {"speech_act":"request|question|statement|emotion|roleplay|quote|lyric|other",
@@ -63,8 +64,9 @@ _ANALYZE_SYSTEM = """你是中文群聊的语用分析师，只输出 JSON，不
  "needs_web":true/false,
  "web_query":"公开检索词或null",
  "reply_strategy":"literal|play_along|deadpan|self_deprecate|callout|ask_back|ignore",
- "reply_goal":"这次接话要达到的效果",
+ "reply_goal":"这次接话要达到的自然对话效果，不是解释梗",
  "reply_seed":"可选的自然短句，不确定就空",
+ "wants_explanation":true/false,
  "risk":"none|edgy|offensive"}"""
 
 _REFINE_SYSTEM = """你是中文语用分析师的复核器，只输出 JSON。
@@ -212,6 +214,7 @@ def _normalize_analysis(data: dict | None, catalog_ids: set[str] | None = None) 
         "reply_strategy": strategy,
         "reply_goal": _clean(data.get("reply_goal"), 240),
         "reply_seed": _clean(data.get("reply_seed"), 160),
+        "wants_explanation": bool(data.get("wants_explanation")),
         "risk": str(data.get("risk") or "none")[:20],
         "web_used": False,
         "web_sources": [],
