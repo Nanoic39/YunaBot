@@ -5440,6 +5440,65 @@ def _strip_speaker_prefix(text: str) -> str:
     return ""
 
 
+_REASONING_CUE = re.compile(
+    r"(推测|考虑响应|最终选择|最后选择|采用.{0,12}(?:语气|方式)|"
+    r"表达.{0,12}(?:意愿|兴趣|请求)|请求帮助|回应了.{0,12}(?:邀请|请求)|"
+    r"目标是|需要.{0,8}回应)"
+)
+
+
+def _strip_reasoning_lines(text: str) -> tuple[str, bool]:
+    """去掉模型外露的第三人称分析/计划行；返回(清理结果, 是否命中线索)。"""
+    lines = str(text or "").splitlines()
+    kept: list[str] = []
+    removed = 0
+    cue_seen = False
+    for line in lines:
+        raw = line.strip()
+        if not raw:
+            continue
+        if _REASONING_CUE.search(raw):
+            cue_seen = True
+            removed += 1
+            continue
+        kept.append(raw)
+    if removed and not kept:
+        return "", cue_seen
+    return "\n".join(kept), cue_seen
+
+
+async def _strip_reasoning_leak(text: str) -> str:
+    """拦截 Gemini 偶尔写进正文的中文/英文分析过程，保留最终台词。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    cleaned, cue_seen = _strip_reasoning_lines(raw)
+    if cleaned and cleaned != raw:
+        logger.info("[chat] 已剥离回复中的分析过程")
+        return cleaned
+    if not cue_seen:
+        return raw
+    # 分析和正文在同一行时，确定性规则无法安全切断，交给便宜模型只做删除。
+    try:
+        fixed = await asyncio.wait_for(
+            _utility_llm().chat(
+                [{"role": "system", "content": "你只做输出清理：删除分析、推测、计划、第三人称叙述，只保留角色实际要说的台词；不要改写台词；保留 [[SPLIT]] 和 [[EMOTE:...]] 标记；如果只剩分析就把整段删掉并输出 [SILENT]。只输出清理后的文本。"},
+                 {"role": "user", "content": raw[:6000]}],
+                temperature=0.0,
+                max_tokens=min(1200, max(80, len(raw) + 80)),
+                disable_thinking=True,
+            ),
+            timeout=12,
+        )
+        fixed = str(fixed or "").strip()
+        if fixed and fixed != "[SILENT]":
+            return fixed
+        return ""
+    except Exception as error:
+        logger.debug(f"[chat] 分析过程清理失败：{error}")
+        return cleaned or raw
+
+
 async def _generate(
     llm: LLMClient,
     kind: str,
@@ -5764,6 +5823,11 @@ async def _generate(
     # 放在所有背景之后，作为本轮“怎么接”的强提示，避免被更早的通用规则冲淡。
     if meme_context:
         system += "\n\n" + meme_context
+    system += (
+        "\n\n【正文输出铁律】你的分析、判断、推测、计划、第三人称描述只留在内部，"
+        "绝对不要写进要发送的正文。直接以角色第一人称说话；不要写“他/她/用户/对方请求”"
+        "“推测…”“考虑响应…”“最终选择…”“采用…语气”这类编排过程的句子。"
+    )
     current_focus = (query_text or focus_text or "").strip()
     if current_focus:
         system += ("\n\n【本轮当前消息】用户刚刚说的是：" + current_focus[:300]
@@ -5925,7 +5989,7 @@ async def _generate(
                             clean = candidate
                     except Exception as e:
                         logger.warning(f"[chat] 防复读重写失败，保留第一版：{e}")
-            return sanitize_roleplay_actions(clean)
+            return sanitize_roleplay_actions(await _strip_reasoning_leak(clean))
         except LLMContentFilterError:
             # 内容被拒重试无意义，直接抛出交由上层给对应提示
             raise
