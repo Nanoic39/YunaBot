@@ -7586,6 +7586,9 @@ async def _answer_question(bot: Bot, gid: str, q: dict):
         return
     if not response or response == "[SILENT]":
         return
+    response = await _strip_reasoning_leak(response)
+    if not response:
+        return
     parts_msg, *_ = _split_parts_emote(response)
     if chat_config.chat_humanize_enabled:
         parts_msg = split_naturally(parts_msg, chat_config.chat_split_probability)
