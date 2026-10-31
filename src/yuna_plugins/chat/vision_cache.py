@@ -35,10 +35,10 @@ class VisionCache:
 
     @staticmethod
     def key(url: str, detail: str = "auto") -> str:
+        # 不能剥离 URL query：QQ 多媒体图不同图片经常共用路径，图片身份
+        # 在 fileid/rkey 等 query 参数里；旧逻辑会把新图命中成旧图描述。
+        # 完整 URL 参与哈希，宁可临时链接变化时多识别一次，也不能张冠李戴。
         raw = str(url or "")
-        # 去掉 URL 上的临时签名参数，同一张图尽量命中
-        if raw.startswith(("http://", "https://")):
-            raw = raw.split("?", 1)[0]
         return hashlib.sha1((raw + "|" + str(detail or "auto")).encode("utf-8", "ignore")).hexdigest()
 
     def get(self, url: str, detail: str = "auto") -> str:

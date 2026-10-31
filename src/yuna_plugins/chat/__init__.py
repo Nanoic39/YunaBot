@@ -6527,7 +6527,6 @@ async def _respond(
     # 避免模型凭印象随便猜。超时不影响本轮回复。
     if (
         image_descriptions
-        and quote_context
         and "图片读取超时" not in image_descriptions
         and has_text
     ):
