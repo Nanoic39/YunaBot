@@ -2,12 +2,13 @@
 from contextlib import contextmanager
 import json,sqlite3,time,math,re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime,timedelta
 from zoneinfo import ZoneInfo
 
 JOIN_RE=re.compile(r'^(?:我也(?:来|去|要|想|算|加入|参加)?(?:一个|个)?|我来(?:一个|个)?|加我(?:一个|个)?|算我(?:一个|个)?|带我一个|我加入|我参加|报名)(?:[~～!！。，,\s]*)$')
 LEAVE_RE=re.compile(r'^(?:那)?(?:我)?(?:也)?(?:先)?\s*(?:退出|退|不打了|不玩了|下车|退赛|退坑|撤了?)(?:一下|了|啦|吧|呗|呀|啊|[~～!！。，,\s])*$')
 WAITLIST_RE=re.compile(r'^(?:给(?:这局|本局)?|这局|本局)?\s*(?:开|加|增加|设置|留|放)\s*(\d{1,2})\s*个?\s*(?:候补|替补)(?:位)?(?:吧|呗|呀|啊|谢谢|。|！|!|~|～|\s)*$')
+JOIN_WAITLIST_RE=re.compile(r'^(?:我|我要|我想|让我|给我|先|就)?\s*(?:(?:上|进|排|当|做)(?:一个|个)?|(?:一个|个))?\s*(?:候补|替补)(?:位)?(?:吧|呗|呀|啊|谢谢|。|！|!|~|～|\s)*$')
 WAITLIST_RE2=re.compile(r'^(?:给(?:这局|本局)?|这局|本局)?\s*(?:候补|替补)(?:位)?\s*(?:开|加|增加|设置|留|放)?\s*(\d{1,2})\s*个?(?:吧|呗|呀|啊|谢谢|。|！|!|~|～|\s)*$')
 WAITLIST_RE3=re.compile(r'^(?:给(?:这局|本局)?|这局|本局)?\s*(\d{1,2})\s*个?\s*(?:候补|替补)(?:位)?(?:吧|呗|呀|啊|谢谢|。|！|!|~|～|\s)*$')
 
@@ -16,6 +17,9 @@ def short_join_phrase(text):
 
 def short_leave_phrase(text):
  return bool(LEAVE_RE.fullmatch(str(text or '').strip()))
+
+def short_join_waitlist_phrase(text):
+ return bool(JOIN_WAITLIST_RE.fullmatch(str(text or '').strip()))
 
 def parse_waitlist_phrase(text):
  text=str(text or '').strip()
@@ -77,6 +81,24 @@ def game_phase(row,now=None):
 
 def phase_name(row,now=None):
  return {'signup':'正在报名','active':'正在进行','ended':'已结束','cancelled':'已取消'}.get(game_phase(row,now),'—')
+
+def normalize_same_evening_start(start, text, now=None):
+    """把“今晚八点”被模型误算成明天时拉回今天；明确说明天/明晚时不动。"""
+    now=time.time() if now is None else float(now)
+    raw=str(text or '')
+    try:start=float(start)
+    except (TypeError,ValueError):return start
+    if re.search(r'明晚|明天|次日|后天',raw):return start
+    if not re.search(r'今晚|今天晚上|今夜|晚上|今天.{0,4}(?:点|时)',raw):return start
+    try:
+        tz=ZoneInfo('Asia/Shanghai')
+        cur=datetime.fromtimestamp(now,tz);target=datetime.fromtimestamp(start,tz)
+        if target.date()==cur.date()+timedelta(days=1):
+            candidate=start-86400
+            if candidate>now+60:return candidate
+    except (TypeError,ValueError,OSError):pass
+    return start
+
 
 class GameStore:
  def __init__(self,path,clock=time.time):
@@ -394,6 +416,22 @@ CREATE TABLE IF NOT EXISTS receipts(account TEXT,gid TEXT,message TEXT,result TE
      full=self._card_row(d,rid,account)
      status=f'✅ 好，{row["game"]}现在有{n}个候补位。' if n else f'✅ 好，{row["game"]}的候补位已关闭。'
      result=game_card(full,'开黑 · 候补位已调整',status,footer='回复「我也来」可以继续报名。')
+    elif action in ('join_waitlist','waitlist_join'):
+     if row['start']<=now:raise ValueError('这局已经到开始时间，先和组织者确认还能否加入吧。')
+     if not int(row['waitlist_capacity'] or 0):raise ValueError('组织者还没有开候补位，先让 TA 开一个吧')
+     member=d.execute('SELECT status FROM members WHERE game_id=? AND qq=?',(rid,qq)).fetchone()
+     formal,waitlist=self._counts(d,rid)
+     if member:
+      if str(row['host'])==qq:raise ValueError('组织者不能去候补位')
+      if member['status']=='waitlist':
+       full=self._card_row(d,rid,account);result=game_card(full,'开黑 · 报名信息','✅ 你已经在候补位啦。')
+      else:
+       d.execute("UPDATE members SET status='waitlist' WHERE game_id=? AND qq=?",(rid,qq))
+       full=self._card_row(d,rid,account);result=game_card(full,'开黑 · 已转候补','✅ 已经把你从正式位挪到候补位，等有人退出会自动补上。')
+     else:
+      if waitlist>=int(row['waitlist_capacity'] or 0):raise ValueError('候补位已经满了')
+      d.execute('INSERT INTO members VALUES(?,?,?,?)',(rid,qq,name[:60],'waitlist'))
+      full=self._card_row(d,rid,account);result=game_card(full,'开黑 · 候补成功',f'✅ 已排进{row["game"]}候补{waitlist+1}/{row["waitlist_capacity"]}。',footer='要退出直接回复「我退出」。')
     elif action=='join':
      if row['start']<=now:raise ValueError('这局已经到开始时间，先和组织者确认还能否加入吧。')
      member=d.execute('SELECT status FROM members WHERE game_id=? AND qq=?',(rid,qq)).fetchone()
@@ -517,7 +555,7 @@ def game_notice(text,title='开黑 · 提示'):
  return f'【{title}】\n{text}'
 
 def game_help():
- return game_notice('告诉我游戏和时间就好，人数不填默认不限。\n· 约局：「/开黑 今晚八点 MC 四个人」\n· 查看：「/开黑 看看」或 @我 说「本群有哪些局」\n· 报名：回复约局卡片或 @我 说「我也来」\n· 退出：「我退出」\n· 候补：组织者可说「开3个候补位」','开黑 · 怎么用')
+ return game_notice('告诉我游戏和时间就好，人数不填默认不限。\n· 约局：「/开黑 今晚八点 MC 四个人」\n· 查看：「/开黑 看看」或 @我 说「本群有哪些局」\n· 报名：回复约局卡片或 @我 说「我也来」\n· 候补：@我说「我要候补」；组织者说「开3个候补位」\n· 退出：「我退出」','开黑 · 怎么用')
 
 def trigger_message(row):
  label=row.get('triggered_text') or _game_trigger_text(row) or '条件达成'

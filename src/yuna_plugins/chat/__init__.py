@@ -7424,6 +7424,19 @@ async def _handle_group(
             from src.agent.chat_preferences import preferences
             asyncio.create_task(preferences.learn(_utility_llm(),text,qq,qq in {str(q) for q in get_driver().config.superusers},'group:'+gid, [{'qq':r.get('qq'),'text':str(r.get('content',''))[:200]} for r in list(_recent.get(gid,[]))[-6:]]))
     except Exception:pass
+    # 引用了 Bot 的消息不代表 Bot 是收件人：本条明确 @ 了别人、且没有 @Bot 时，
+    # 只做一句话题交还，不把“她喜欢你/你会带她走吗”这类话当成对 Bot 说的。
+    at_others_direct = [x for x in _parse_at_qqs(event) if str(x) != str(bot.self_id)]
+    if at_others_direct and not at_bot and quote_context:
+        try:
+            await bot.send(event, MessageSegment.text("这句是问别人的吧，我就不替人答啦～"))
+        except Exception as error:
+            logger.debug(f"[chat] 交还话题消息发送失败：{error}")
+        logger.info(
+            f"[chat] 引用消息明确指向他人，不按Bot被点名 gid={gid} qq={qq} others={at_others_direct}"
+        )
+        return
+
     targeting_hint = targeting_hint_text(targeting)
     pronoun_hint = _pronoun_reference_hint(text, list(_recent.get(gid, [])), qq)
     if pronoun_hint:
