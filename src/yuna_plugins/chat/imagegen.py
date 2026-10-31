@@ -103,7 +103,7 @@ class ImageGenerator:
                 return None
         return None
 
-    async def _generate_gpt(self, text: str, reference_image: str | None) -> str | None:
+    async def _generate_gpt(self, text: str, reference_image: str | None, transparent: bool = False) -> str | None:
         headers = {"Authorization": f"Bearer {self.key}"}
         timeout = 300.0
         try:
@@ -116,8 +116,7 @@ class ImageGenerator:
                         "prompt": text,
                         "n": "1",
                         "size": self.size,
-                        "background": "transparent",
-                        "output_format": "png",
+                        **({"background": "transparent", "output_format": "png"} if transparent else {}),
                     }
                     files = {"image": ("reference.png", raw, "image/png")}
                     response = await client.post(self._edit_url(), data=fields, files=files, headers=headers)
@@ -132,8 +131,7 @@ class ImageGenerator:
                         "prompt": text,
                         "n": 1,
                         "size": self.size,
-                        "background": "transparent",
-                        "output_format": "png",
+                        **({"background": "transparent", "output_format": "png"} if transparent else {}),
                     }
                     response = await client.post(self._url(), json=payload, headers=headers)
                     if response.status_code in (400, 422):
@@ -157,7 +155,7 @@ class ImageGenerator:
             logger.warning(f"[imagegen] GPT 图片生成异常：{error}")
             return None
 
-    async def generate(self, prompt: str, reference_image: str | None = None) -> str | None:
+    async def generate(self, prompt: str, reference_image: str | None = None, transparent: bool = False) -> str | None:
         if not self.available:
             return None
         text = str(prompt or "").strip()[:1200]
@@ -170,7 +168,7 @@ class ImageGenerator:
             "Content-Type": "application/json",
         }
         if self.provider in ("gpt", "openai", "gpt-image", "kitool"):
-            return await self._generate_gpt(text, reference_image)
+            return await self._generate_gpt(text, reference_image, transparent=transparent)
         payload = {
             "model": self.model,
             "prompt": text,

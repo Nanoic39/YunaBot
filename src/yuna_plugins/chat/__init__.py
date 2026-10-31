@@ -27,6 +27,7 @@ from nonebot import (
 from nonebot.adapters.onebot.v11 import (
     Bot,
     FriendRecallNoticeEvent,
+    GroupUploadNoticeEvent,
     PokeNotifyEvent,
     GroupMessageEvent,
     GroupRecallNoticeEvent,
@@ -455,6 +456,9 @@ _web_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次请求时间
 _bystander_last: dict[str, float] = {}  # 群 -> 上次旁听插话时间
 _self_sticker_tasks: set[asyncio.Task] = set()  # 自绘Q版表情任务
 _self_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次自绘时间
+_visible_events: dict[str, deque] = {}  # 群 -> 戳一戳/文件等可见事件
+_natural_image_tasks: set[asyncio.Task] = set()
+_natural_image_last: dict[str, float] = {}
 _emote_hash_index: dict[str, dict] | None = None  # 图片 hash -> 判断/收藏记录（懒加载）
 _emote_audit_task: asyncio.Task | None = (
     None  # 人工触发的已收藏表情审查任务（同时只跑一个）
@@ -2943,6 +2947,55 @@ def _detect_sensitive_address(qq: str, text: str) -> bool:
     return False
 
 
+def _event_name(qq: str) -> str:
+    qq = str(qq or "").strip()
+    if not qq:
+        return "某人"
+    info = (_load_users() or {}).get(qq) or {}
+    return str(info.get("card") or info.get("nickname") or qq)[:30] or qq
+
+
+def _record_visible_event(gid: str, kind: str, actor: str = "", target: str = "", detail: str = "") -> None:
+    """记录群内可见但非普通消息的事件，供聊天/生图提示词参考。"""
+    gid = str(gid or "").strip()
+    if not gid:
+        return
+    buf = _visible_events.setdefault(gid, deque(maxlen=40))
+    buf.append({
+        "time": time.time(),
+        "kind": str(kind or "event")[:20],
+        "actor": str(actor or "")[:32],
+        "actor_name": _event_name(actor),
+        "target": str(target or "")[:32],
+        "target_name": _event_name(target) if target else "",
+        "detail": str(detail or "")[:120],
+    })
+
+
+def _visible_event_lines(gid: str, limit: int = 10, max_age: int = 7200) -> list[str]:
+    gid = str(gid or "").strip()
+    if not gid:
+        return []
+    now = time.time()
+    rows = [r for r in list(_visible_events.get(gid, []))
+            if isinstance(r, dict) and now - float(r.get("time") or 0) <= max_age]
+    lines: list[str] = []
+    for row in rows[-limit:]:
+        when = time.strftime("%H:%M", time.localtime(float(row.get("time") or 0)))
+        actor = str(row.get("actor_name") or row.get("actor") or "某人")
+        target = str(row.get("target_name") or row.get("target") or "")
+        kind = str(row.get("kind") or "")
+        if kind == "poke":
+            lines.append(f"{when} {actor} 戳了戳 {target or '某人'}")
+        elif kind == "upload":
+            lines.append(f"{when} {actor} 上传了文件「{str(row.get('detail') or '未命名')}」")
+        elif kind == "file":
+            lines.append(f"{when} {actor} 发送了文件「{str(row.get('detail') or '未命名')}」")
+        else:
+            lines.append(f"{when} {actor} {str(row.get('detail') or kind)}")
+    return lines
+
+
 def _append_recent(
     key: str,
     role: str,
@@ -4882,6 +4935,7 @@ def _build_system_prompt(
     semantic_context: str = "",
     topic_context: str = "",
     slang_hint: str = "",
+    visible_events: list[str] | None = None,
 ) -> str:
     parts = [_character_prompt]
     parts.append(
@@ -4912,6 +4966,12 @@ def _build_system_prompt(
     parts.append(
         f"【当前时间】{now.strftime('%Y-%m-%d %H:%M')} 星期{weekday}（北京时间）。"
     )
+    if visible_events:
+        parts.append(
+            "【群内可见事件】下面是群里最近真实发生的非普通消息事件（戳一戳、文件上传等）：\n"
+            + "\n".join(visible_events[-10:])
+            + "\n这些事件只作为群内动态背景；不要把它们写成某个人对你说的话，也不要因为被戳就当成提问。"
+        )
 
     if growth_persona:
         parts.append(
@@ -5315,12 +5375,14 @@ def _poke_reply_text(qq: str, favor: float) -> str:
 
 
 async def _handle_poke_event(bot: Bot, event: PokeNotifyEvent):
+    qq = str(event.user_id)
+    gid = str(event.group_id) if getattr(event, "group_id", None) else ""
+    if gid:
+        _record_visible_event(gid, "poke", qq, str(getattr(event, "target_id", "") or ""))
     if not getattr(chat_config, "chat_poke_enabled", True):
         return
-    qq = str(event.user_id)
     if not qq.isdigit() or qq == str(event.self_id):
         return
-    gid = str(event.group_id) if getattr(event, "group_id", None) else ""
     scope = f"group:{gid}" if gid else f"user:{qq}"
     if not _poke_allowed(scope, qq):
         return
@@ -5686,6 +5748,7 @@ async def _generate(
         selected_self_events = await _select_self_events(
             llm, search_text, search_recent, _self_memory.recent_events(days=30, limit=30), quote_context)
 
+    visible_events = _visible_event_lines(key) if kind == "group" else []
     members = _collect_members(key)
     if qq and qq.isdigit() and qq not in {m[0] for m in members}:
         members.append((qq, user_info.get("nickname", "")))
@@ -5721,6 +5784,7 @@ async def _generate(
         semantic_context,
         topic_context,
         slang_hint,
+        visible_events=visible_events,
     )
     if long_task:
         system += ("\n\n【长任务执行计划】本轮记录已自动按顺序拆分、逐段阅读并汇总，不是只拿到开头。"
@@ -6046,7 +6110,7 @@ async def _route_intent(
         if (u.get("nickname") or "").strip()
     ]
     prompt = (
-        "判断用户这句话的意图，六选一：\n"
+        "判断用户这句话的意图，七选一：\n"
         "1) set_alias：用户在设置你对某人的称呼。如“以后叫我xxx”“叫我xxx”“你可以称呼我为xxx”"
         '（target 填 "self"）；或“称呼QQ号123为yyy”（target 填 "123"）。alias 填称呼内容。\n'
         "2) recall：用户在询问其他群聊、其他用户，或某个具体的人（用昵称/称呼指代）的近期情况或记忆。"
@@ -6058,6 +6122,9 @@ async def _route_intent(
         "5) self_sticker：用户明确要求你画/生成一张以你本人形象、立绘或参考图为原型的Q版表情包/贴纸。"
         "例如“画个你自己的Q版”“用你的立绘做个表情包”；这不是让你联网找图，也不是普通聊天。"
         "6) web_sticker：用户要求你从网上找、下载或发一张表情包/贴纸/meme图。"
+        "7) image_generate：用户要求你根据描述生成/画一张图片，可能结合本群聊天、群友印象、"
+        "指定画面、标注昵称或中文文字。不是让你联网找现成图，也不是只画你自己的Q版（那选self_sticker）。"
+        "用户的要求可以很自然、很具体，必须按原意理解，不能套固定模板。"
         "用户可能用谐音、错字、昵称或只有群友懂的梗语言指代角色/作品，例如把某个角色叫成别的外号；"
         "必须结合上下文和公开知识还原，不能按字面乱搜，也不能用固定词表。"
         'sticker_subject 填还原后的标准角色/作品/主体名；sticker_queries 填2到4个公开图片检索短词'
@@ -6070,7 +6137,7 @@ async def _route_intent(
         prompt += "你掌握的其他记忆清单：\n" + "\n".join(map_lines) + "\n"
     prompt += (
         f"\n当前用户 QQ 号：{qq}\n用户的话：{text}\n"
-        '只输出 JSON：{"intent": "set_alias"|"recall"|"usage_stats"|"chat"|"self_sticker"|"web_sticker", '
+        '只输出 JSON：{"intent": "set_alias"|"recall"|"usage_stats"|"chat"|"self_sticker"|"web_sticker"|"image_generate", '
         '"target": "self"或"<QQ号>"或"group:编号"或"user:编号"或null, "alias": "称呼内容"或null, '
         '"sticker_subject": "标准主体名"或null, "sticker_queries": ["检索短词"], "sticker_style": "风格"或null}。'
     )
@@ -6126,7 +6193,7 @@ async def _route_intent(
     if not isinstance(obj, dict):
         return None
     intent = obj.get("intent")
-    if intent not in ("set_alias", "recall", "usage_stats", "chat", "self_sticker", "web_sticker"):
+    if intent not in ("set_alias", "recall", "usage_stats", "chat", "self_sticker", "web_sticker", "image_generate"):
         return None
     target = obj.get("target")
     logger.info(
@@ -6601,7 +6668,7 @@ async def _generate_self_sticker(bot: Bot, event: MessageEvent, gid, qq: str,
                                  reply_prefix, scene: str = ""):
     try:
         path = await asyncio.wait_for(
-            _image_gen.generate(_self_sticker_prompt(scene), reference_image=str(CHARACTER_REFERENCE_FILE)),
+            _image_gen.generate(_self_sticker_prompt(scene), reference_image=str(CHARACTER_REFERENCE_FILE), transparent=True),
             timeout=300,
         )
         if not path:
@@ -6669,6 +6736,149 @@ def _maybe_schedule_spontaneous_sticker(bot: Bot, event: MessageEvent, gid, qq: 
     _self_sticker_tasks.add(task)
     task.add_done_callback(_self_sticker_tasks.discard)
     logger.info(f"[chat] 按概率触发自绘Q版表情 gid={gid} qq={qq} chance={chance}")
+
+
+def _image_group_context(gid: str, qq: str = "") -> str:
+    if not gid:
+        return "私聊场景，没有群聊背景。"
+    group = _find_group(str(gid)) or {}
+    gname = str(group.get("name") or group.get("remark") or group.get("group_name") or gid)
+    users = _load_users()
+    personas = _get_personas("group", str(gid))
+    members = _collect_members(str(gid))
+    lines = [f"群名：{gname}"]
+    member_lines = []
+    for mqq, mname in members[:24]:
+        mqq = str(mqq)
+        prof = personas.get(mqq) if isinstance(personas, dict) else {}
+        prof = prof if isinstance(prof, dict) else {}
+        name = str(prof.get("nickname") or mname or users.get(mqq, {}).get("nickname") or mqq)
+        style = prof.get("style") if isinstance(prof.get("style"), dict) else {}
+        traits = "；".join(
+            f"{k}={v}" for k, v in style.items() if v and k in ("语气", "性格", "常见话题", "关系亲疏", "活跃度")
+        )
+        member_lines.append(f"- {name}" + (f"：{traits[:120]}" if traits else ""))
+    if member_lines:
+        lines.append("群成员及已有印象：")
+        lines.extend(member_lines[:18])
+    try:
+        summary = _memory.get_summary("group", str(gid))
+        facts = _memory.get_long_term("group", str(gid), limit=10)
+        if summary:
+            lines.append("群长期摘要：" + str(summary)[:500])
+        if facts:
+            lines.append("群长期记忆：" + "；".join(str(x)[:120] for x in facts[:10]))
+    except Exception:
+        pass
+    events = _visible_event_lines(str(gid), limit=12)
+    if events:
+        lines.append("最近可见事件：")
+        lines.extend("- " + x for x in events)
+    recent = []
+    for row in list(_recent.get(str(gid), []))[-24:]:
+        text = str(row.get("content") or "").strip()
+        if not text:
+            continue
+        name = str(row.get("name") or row.get("qq") or ("Yuna" if row.get("role") == "assistant" else "群友"))
+        recent.append(f"- {name}：{text[:220]}")
+    if recent:
+        lines.append("最近聊天：")
+        lines.extend(recent[-18:])
+    if qq:
+        info = users.get(str(qq), {}) if isinstance(users, dict) else {}
+        lines.append("当前请求者：" + str(info.get("nickname") or qq))
+    return "\n".join(lines)[:9000]
+
+
+async def _compose_image_prompt(user_request: str, context: str) -> dict:
+    default = (
+        "根据用户要求创作一张完整插画。默认在画面中加入清晰、准确的中文文字/标注；"
+        "如果用户要求写群友昵称，必须逐个使用提供的昵称，不要编造名字或乱码。"
+        "保留用户自然语言里的所有具体要求和意象，不要套固定版式；"
+        "文字要融进画面构图，不要糊成乱码或重复。"
+    )
+    if not _image_gen.available:
+        return {"prompt": "", "use_reference": False}
+    system = (
+        "你是图像提示词设计师。根据用户的自然语言要求和群聊背景，写一段可直接交给图片模型的提示词。"
+        "必须忠实保留用户意图，不能把要求套成固定模板。默认图片中要包含清晰、准确的中文文字/标注；"
+        "只有用户明确说不要文字时才省略。用户要求标注群友昵称或个人印象时，必须使用提供的真实昵称和已有印象，"
+        "不能编造人物或乱改名字。判断是否需要结合机器人自己的立绘参考图（仅当用户要求画机器人本人/它的Q版形象时）。"
+        "只输出 JSON：{\"prompt\":\"...\",\"use_reference\":true/false,\"reason\":\"...\"}。"
+    )
+    payload = {"request": str(user_request or "")[:2000], "context": str(context or "")[:9000], "default": default}
+    try:
+        raw = await asyncio.wait_for(
+            _utility_llm().chat(
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+                temperature=0.2, max_tokens=1200, disable_thinking=True, json_mode=True,
+            ), timeout=25,
+        )
+        raw = re.sub(r"^```(?:json)?|```$", "", str(raw or "").strip(), flags=re.I).strip()
+        obj = json.loads(raw)
+        prompt = str(obj.get("prompt") or "").strip()
+        if prompt:
+            return {"prompt": prompt, "use_reference": bool(obj.get("use_reference")), "reason": str(obj.get("reason") or "")}
+    except Exception as error:
+        logger.debug(f"[chat] 生图提示词合成失败：{error}")
+    return {"prompt": (default + "\n用户要求：" + str(user_request or "") + "\n群背景：\n" + str(context or ""))[:7000],
+            "use_reference": False}
+
+
+async def _generate_natural_image(bot: Bot, event: MessageEvent, gid, qq: str, text: str, reply_prefix):
+    try:
+        context = _image_group_context(str(gid or ""), str(qq or ""))
+        spec = await _compose_image_prompt(text, context)
+        prompt = spec.get("prompt") or ""
+        if not prompt:
+            await bot.send(event, reply_prefix + MessageSegment.text("我这边暂时没想好画面…"))
+            return
+        path = await asyncio.wait_for(
+            _image_gen.generate(
+                prompt,
+                reference_image=str(CHARACTER_REFERENCE_FILE) if spec.get("use_reference") else None,
+                transparent=False,
+            ), timeout=300,
+        )
+        if not path:
+            await bot.send(event, reply_prefix + MessageSegment.text("图没画出来，稍后再试试～"))
+            return
+        await bot.send(event, reply_prefix + MessageSegment.image(f"file://{path}"))
+        note = "〔按你的描述生成的图片〕"
+        _memory.add_turn("group" if gid else "user", gid or qq, "assistant", "", note)
+        _append_recent(gid or qq, "assistant", "", "", note)
+        logger.info(f"[chat] 自然语言生图已发送 gid={gid} qq={qq}")
+    except asyncio.TimeoutError:
+        logger.warning("[chat] 自然语言生图超时")
+        try:
+            await bot.send(event, reply_prefix + MessageSegment.text("画图等太久了，先没画完…"))
+        except Exception:
+            pass
+    except Exception as error:
+        logger.warning(f"[chat] 自然语言生图失败：{error}")
+
+
+async def _maybe_handle_natural_image(bot: Bot, event: MessageEvent, gid, qq: str,
+                                      text: str, intent: dict, reply_prefix) -> bool:
+    if not intent or intent.get("intent") != "image_generate":
+        return False
+    if not _image_gen.available:
+        return False
+    key = str(gid or qq)
+    now = time.time()
+    if now - _natural_image_last.get(key, 0) < 45:
+        return False
+    _natural_image_last[key] = now
+    ack = "好，我想一下画面，稍等～" if str(qq) == str(_brother_qq) else "好，我想一下画面，稍等～"
+    try:
+        await bot.send(event, reply_prefix + MessageSegment.text(ack))
+    except Exception as error:
+        logger.debug(f"[chat] 生图确认发送失败：{error}")
+    task = asyncio.create_task(_generate_natural_image(bot, event, gid, qq, text, reply_prefix))
+    _natural_image_tasks.add(task)
+    task.add_done_callback(_natural_image_tasks.discard)
+    return True
 
 
 async def _respond(
@@ -6870,6 +7080,8 @@ async def _respond(
         if await _maybe_handle_web_sticker(bot, event, gid, qq, text, intent or {}, reply_prefix):
             return
         if await _maybe_handle_self_sticker(bot, event, gid, qq, text, intent or {}, reply_prefix):
+            return
+        if await _maybe_handle_natural_image(bot, event, gid, qq, text, intent or {}, reply_prefix):
             return
         qq_plan = intent.get('qq_plan') if intent else None
         if party and party.enabled() and intent and intent.get('party_plan'):
@@ -8278,6 +8490,21 @@ async def _slang_prune_job():
 
 
 # 戳一戳：优先回戳；状态插件仍可在更高优先级处理自己的功能。
+group_upload_matcher = on_notice(priority=4, block=False)
+
+
+@group_upload_matcher.handle()
+async def _group_upload_context(event: GroupUploadNoticeEvent):
+    if not isinstance(event, GroupUploadNoticeEvent):
+        return
+    try:
+        file_info = event.file or {}
+        name = str(file_info.get("name") or file_info.get("file") or "未命名文件")
+        _record_visible_event(str(event.group_id), "upload", str(event.user_id), detail=name)
+    except Exception as error:
+        logger.debug(f"[chat] 文件事件记录失败：{error}")
+
+
 poke_matcher = on_type((PokeNotifyEvent,), rule=to_me(), priority=5, block=True)
 
 
