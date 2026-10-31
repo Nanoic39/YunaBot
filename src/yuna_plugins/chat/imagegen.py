@@ -37,7 +37,16 @@ class ImageGenerator:
     def _url(self) -> str:
         if self.base.endswith("/images/generations"):
             return self.base
+        if self.base.endswith("/images/edits"):
+            return self.base[:-len("/edits")] + "/generations"
         return f"{self.base}/images/generations"
+
+    def _edit_url(self) -> str:
+        if self.base.endswith("/images/edits"):
+            return self.base
+        if self.base.endswith("/images/generations"):
+            return self.base[:-len("/generations")] + "/edits"
+        return f"{self.base}/images/edits"
 
     @staticmethod
     def _ext(data: bytes) -> str:
@@ -68,6 +77,86 @@ class ImageGenerator:
                 pass
         return str(path)
 
+    @staticmethod
+    async def _read_response(response, client) -> str | None:
+        if response.status_code >= 400:
+            logger.warning(
+                f"[imagegen] 图片生成失败 HTTP {response.status_code}: "
+                f"{response.text[:180]}"
+            )
+            return None
+        data = response.json()
+        item = (data.get("data") or [{}])[0] if isinstance(data, dict) else {}
+        if item.get("b64_json"):
+            try:
+                return base64.b64decode(item["b64_json"]).decode("latin1")
+            except Exception:
+                return None
+        url = item.get("url")
+        if url:
+            try:
+                downloaded = await client.get(url)
+                if downloaded.status_code >= 400:
+                    return None
+                return downloaded.content.decode("latin1")
+            except Exception:
+                return None
+        return None
+
+    async def _generate_gpt(self, text: str, reference_image: str | None) -> str | None:
+        headers = {"Authorization": f"Bearer {self.key}"}
+        timeout = 300.0
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                ref = Path(reference_image) if reference_image else None
+                if ref is not None and ref.is_file() and ref.stat().st_size <= 20 * 1024 * 1024:
+                    raw = ref.read_bytes()
+                    fields = {
+                        "model": self.model,
+                        "prompt": text,
+                        "n": "1",
+                        "size": self.size,
+                        "background": "transparent",
+                        "output_format": "png",
+                    }
+                    files = {"image": ("reference.png", raw, "image/png")}
+                    response = await client.post(self._edit_url(), data=fields, files=files, headers=headers)
+                    if response.status_code in (400, 422):
+                        fields.pop("background", None)
+                        fields.pop("output_format", None)
+                        files = {"image": ("reference.png", raw, "image/png")}
+                        response = await client.post(self._edit_url(), data=fields, files=files, headers=headers)
+                else:
+                    payload = {
+                        "model": self.model,
+                        "prompt": text,
+                        "n": 1,
+                        "size": self.size,
+                        "background": "transparent",
+                        "output_format": "png",
+                    }
+                    response = await client.post(self._url(), json=payload, headers=headers)
+                    if response.status_code in (400, 422):
+                        payload.pop("background", None)
+                        payload.pop("output_format", None)
+                        response = await client.post(self._url(), json=payload, headers=headers)
+                if response.status_code >= 400:
+                    logger.warning(f"[imagegen] GPT 图片生成失败 HTTP {response.status_code}: {response.text[:180]}")
+                    return None
+                data = response.json()
+                item = (data.get("data") or [{}])[0] if isinstance(data, dict) else {}
+                raw = None
+                if item.get("b64_json"):
+                    raw = base64.b64decode(item["b64_json"])
+                elif item.get("url"):
+                    downloaded = await client.get(item["url"])
+                    if downloaded.status_code < 400:
+                        raw = downloaded.content
+                return self._save(raw) if raw else None
+        except Exception as error:
+            logger.warning(f"[imagegen] GPT 图片生成异常：{error}")
+            return None
+
     async def generate(self, prompt: str, reference_image: str | None = None) -> str | None:
         if not self.available:
             return None
@@ -80,6 +169,8 @@ class ImageGenerator:
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
         }
+        if self.provider in ("gpt", "openai", "gpt-image", "kitool"):
+            return await self._generate_gpt(text, reference_image)
         payload = {
             "model": self.model,
             "prompt": text,

@@ -241,6 +241,10 @@ class Config(BaseModel):
         "photorealistic, realistic photo, 3D render, CGI, text, watermark, logo, "
         "low quality, bad anatomy, extra fingers, nsfw"
     )
+    # 结合人设参考图生成Q版表情包；显式要求时生成，普通玩笑按概率偶然生成
+    chat_self_sticker_enabled: bool = True
+    chat_self_sticker_probability: float = 0.12
+    chat_self_sticker_cooldown_seconds: int = 1800
     # 空间评论：轮询自己的说说，发现新评论后公开回复
     chat_qzone_comment_enabled: bool = True
     # 空闲轮询间隔；新说说发布后进入 hot window，用更短的间隔

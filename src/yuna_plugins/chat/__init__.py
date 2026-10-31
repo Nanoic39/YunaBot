@@ -453,6 +453,8 @@ _emote_learn_tasks: set[asyncio.Task] = set()  # 后台表情包学习任务，�
 _web_sticker_tasks: set[asyncio.Task] = set()  # 联网找表情包任务
 _web_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次请求时间
 _bystander_last: dict[str, float] = {}  # 群 -> 上次旁听插话时间
+_self_sticker_tasks: set[asyncio.Task] = set()  # 自绘Q版表情任务
+_self_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次自绘时间
 _emote_hash_index: dict[str, dict] | None = None  # 图片 hash -> 判断/收藏记录（懒加载）
 _emote_audit_task: asyncio.Task | None = (
     None  # 人工触发的已收藏表情审查任务（同时只跑一个）
@@ -6044,7 +6046,7 @@ async def _route_intent(
         if (u.get("nickname") or "").strip()
     ]
     prompt = (
-        "判断用户这句话的意图，五选一：\n"
+        "判断用户这句话的意图，六选一：\n"
         "1) set_alias：用户在设置你对某人的称呼。如“以后叫我xxx”“叫我xxx”“你可以称呼我为xxx”"
         '（target 填 "self"）；或“称呼QQ号123为yyy”（target 填 "123"）。alias 填称呼内容。\n'
         "2) recall：用户在询问其他群聊、其他用户，或某个具体的人（用昵称/称呼指代）的近期情况或记忆。"
@@ -6053,7 +6055,9 @@ async def _route_intent(
         "3) usage_stats：用户在打听调用统计。如“这个群里调用次数最多的几个人”“谁烧的token/花费最多”"
         "“你被调用了多少次/用了多少token”。target 和 alias 都填 null。\n"
         "4) chat：普通聊天。target 和 alias 都填 null。\n"
-        "5) web_sticker：用户要求你从网上找、下载或发一张表情包/贴纸/meme图。"
+        "5) self_sticker：用户明确要求你画/生成一张以你本人形象、立绘或参考图为原型的Q版表情包/贴纸。"
+        "例如“画个你自己的Q版”“用你的立绘做个表情包”；这不是让你联网找图，也不是普通聊天。"
+        "6) web_sticker：用户要求你从网上找、下载或发一张表情包/贴纸/meme图。"
         "用户可能用谐音、错字、昵称或只有群友懂的梗语言指代角色/作品，例如把某个角色叫成别的外号；"
         "必须结合上下文和公开知识还原，不能按字面乱搜，也不能用固定词表。"
         'sticker_subject 填还原后的标准角色/作品/主体名；sticker_queries 填2到4个公开图片检索短词'
@@ -6066,7 +6070,7 @@ async def _route_intent(
         prompt += "你掌握的其他记忆清单：\n" + "\n".join(map_lines) + "\n"
     prompt += (
         f"\n当前用户 QQ 号：{qq}\n用户的话：{text}\n"
-        '只输出 JSON：{"intent": "set_alias"|"recall"|"usage_stats"|"chat"|"web_sticker", '
+        '只输出 JSON：{"intent": "set_alias"|"recall"|"usage_stats"|"chat"|"self_sticker"|"web_sticker", '
         '"target": "self"或"<QQ号>"或"group:编号"或"user:编号"或null, "alias": "称呼内容"或null, '
         '"sticker_subject": "标准主体名"或null, "sticker_queries": ["检索短词"], "sticker_style": "风格"或null}。'
     )
@@ -6122,7 +6126,7 @@ async def _route_intent(
     if not isinstance(obj, dict):
         return None
     intent = obj.get("intent")
-    if intent not in ("set_alias", "recall", "usage_stats", "chat", "web_sticker"):
+    if intent not in ("set_alias", "recall", "usage_stats", "chat", "self_sticker", "web_sticker"):
         return None
     target = obj.get("target")
     logger.info(
@@ -6577,6 +6581,96 @@ async def _maybe_handle_web_sticker(bot: Bot, event: MessageEvent, gid, qq: str,
     return True
 
 
+def _self_sticker_prompt(scene: str = "") -> str:
+    detail = re.sub(r"\s+", " ", str(scene or "")).strip()[:240]
+    return (
+        "Use the character in the reference image as the exact same person. "
+        "Keep her long straight deep teal-blue hair with straight bangs, blue eyes, pale skin, "
+        "and the small green terminal-style hair clip unchanged. "
+        "Keep her reference outfit: white sailor-style top with a green ribbon, long white lab coat, "
+        "light blue pleated skirt, white thigh-high socks with green band, and white shoes with green accents. "
+        "Create ONE cute Q-version chibi sticker of this same character, super-deformed proportions, "
+        "large expressive eyes, simple clean line art, soft cel shading, transparent background, "
+        "single character only, centered, no scenery, no text, no watermark, no logo, no border, no photorealistic, no 3D render. "
+        "The expression and pose should fit this chat moment naturally and be usable as a QQ sticker: "
+        + (detail or "playful and slightly teasing")
+    )
+
+
+async def _generate_self_sticker(bot: Bot, event: MessageEvent, gid, qq: str,
+                                 reply_prefix, scene: str = ""):
+    try:
+        path = await asyncio.wait_for(
+            _image_gen.generate(_self_sticker_prompt(scene), reference_image=str(CHARACTER_REFERENCE_FILE)),
+            timeout=300,
+        )
+        if not path:
+            logger.info("[chat] 自绘Q版表情未生成")
+            return
+        await bot.send(event, reply_prefix + MessageSegment.image(f"file://{path}"))
+        note = "〔Q版表情包〕"
+        _memory.add_turn("group" if gid else "user", gid or qq, "assistant", "", note)
+        _append_recent(gid or qq, "assistant", "", "", note)
+        logger.info(f"[chat] 自绘Q版表情已发送 gid={gid} qq={qq}")
+    except asyncio.TimeoutError:
+        logger.warning("[chat] 自绘Q版表情超时")
+    except Exception as error:
+        logger.warning(f"[chat] 自绘Q版表情失败：{error}")
+
+
+async def _maybe_handle_self_sticker(bot: Bot, event: MessageEvent, gid, qq: str,
+                                     text: str, intent: dict, reply_prefix) -> bool:
+    if not intent or intent.get("intent") != "self_sticker":
+        return False
+    if not chat_config.chat_self_sticker_enabled or not _image_gen.available:
+        return False
+    key = str(gid or qq)
+    now = time.time()
+    if now - _self_sticker_last.get(key, 0) < max(60, int(chat_config.chat_self_sticker_cooldown_seconds)):
+        return False
+    _self_sticker_last[key] = now
+    ack = "好呀，我画一张 Q 版的，稍等～" if str(qq) == str(_brother_qq) else "好，我画一张 Q 版的，稍等～"
+    try:
+        await bot.send(event, reply_prefix + MessageSegment.text(ack))
+    except Exception as error:
+        logger.debug(f"[chat] 自绘确认发送失败：{error}")
+    task = asyncio.create_task(_generate_self_sticker(bot, event, gid, qq, reply_prefix, text))
+    _self_sticker_tasks.add(task)
+    task.add_done_callback(_self_sticker_tasks.discard)
+    return True
+
+
+def _maybe_schedule_spontaneous_sticker(bot: Bot, event: MessageEvent, gid, qq: str,
+                                        text: str, meme_analysis: dict | None,
+                                        trigger: str, images: list, quote_context: str,
+                                        reply_prefix) -> None:
+    if not chat_config.chat_self_sticker_enabled or not _image_gen.available:
+        return
+    if trigger not in ("mention", "private"):
+        return
+    if images or quote_context or not _meaningful_part(text or ""):
+        return
+    analysis = meme_analysis or {}
+    if analysis.get("mode") != "banter" and analysis.get("speech_act") != "emotion":
+        return
+    key = str(gid or qq)
+    now = time.time()
+    if now - _self_sticker_last.get(key, 0) < max(60, int(chat_config.chat_self_sticker_cooldown_seconds)):
+        return
+    try:
+        chance = max(0.0, min(1.0, float(chat_config.chat_self_sticker_probability)))
+    except (TypeError, ValueError):
+        chance = 0.0
+    if random.random() >= chance:
+        return
+    _self_sticker_last[key] = now
+    scene = str(analysis.get("meaning") or analysis.get("reply_goal") or text or "playful chat")[:240]
+    task = asyncio.create_task(_generate_self_sticker(bot, event, gid, qq, reply_prefix, scene))
+    _self_sticker_tasks.add(task)
+    task.add_done_callback(_self_sticker_tasks.discard)
+    logger.info(f"[chat] 按概率触发自绘Q版表情 gid={gid} qq={qq} chance={chance}")
+
+
 async def _respond(
     bot: Bot,
     event: MessageEvent,
@@ -6774,6 +6868,8 @@ async def _respond(
         qq_context['constraints'] = qq_constraints
         intent = await _route_intent(_utility_llm(), kind, key, qq, text, qq_context=qq_context)
         if await _maybe_handle_web_sticker(bot, event, gid, qq, text, intent or {}, reply_prefix):
+            return
+        if await _maybe_handle_self_sticker(bot, event, gid, qq, text, intent or {}, reply_prefix):
             return
         qq_plan = intent.get('qq_plan') if intent else None
         if party and party.enabled() and intent and intent.get('party_plan'):
@@ -7055,6 +7151,9 @@ async def _respond(
                 logger.info(
                     f"[chat] 表情判断 kind={kind} key={key} 情绪={emote} 理由={reason or ''} → 目录 {emote} 无图，不发图"
                 )
+    _maybe_schedule_spontaneous_sticker(
+        bot, event, gid, qq, text, meme_analysis, trigger, images, quote_context, reply_prefix
+    )
     _maybe_consolidate(gid, kind, key)
 
 
