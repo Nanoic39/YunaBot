@@ -452,6 +452,7 @@ _emote_learn_ts: dict[str, deque] = {}  # 群 -> 最近表情包判断时间戳�
 _emote_learn_tasks: set[asyncio.Task] = set()  # 后台表情包学习任务，持有引用防被回收
 _web_sticker_tasks: set[asyncio.Task] = set()  # 联网找表情包任务
 _web_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次请求时间
+_bystander_last: dict[str, float] = {}  # 群 -> 上次旁听插话时间
 _emote_hash_index: dict[str, dict] | None = None  # 图片 hash -> 判断/收藏记录（懒加载）
 _emote_audit_task: asyncio.Task | None = (
     None  # 人工触发的已收藏表情审查任务（同时只跑一个）
@@ -7358,6 +7359,58 @@ async def _resolve_forward_context(bot: Bot, message, extra_message=None) -> tup
     return text[:24000], embedded[:120]
 
 
+async def _judge_bystander(gid: str, text: str, quote_context: str,
+                         at_others: list[str], qq: str) -> tuple[bool, str]:
+    """引用的是Bot自己的消息、但本条明确@别人时，判断是否适合旁听插话。"""
+    now = time.time()
+    if now - _bystander_last.get(str(gid), 0) < 90:
+        return False, ""
+    prompt = (
+        "这是一段群聊。当前消息引用了机器人自己以前发的话，但说话人明确@了别人，"
+        "所以这句话主要在对那个别人说，不是直接问机器人。"
+        "请判断机器人这时是否适合自然地插一句：只有当话题明显涉及机器人、在拿机器人打趣、"
+        "或者引用机器人的话形成了自然笑点/可接话的梗时，才 interject=true；"
+        "如果只是两个人私聊、提问、调情、严肃讨论或不需要机器人参与，必须 false。"
+        "如果 true，给一句简短的旁听提示 hint，要求：不抢答、不替被@的人回答、不把问题当成问自己、"
+        "最多一句自然打趣或轻轻接一下，不追问。"
+        '只输出 JSON：{"interject":true/false,"confidence":0.0,"hint":""}'
+    )
+    payload = {
+        "current": str(text or "")[:800],
+        "quote": str(quote_context or "")[:1200],
+        "at_others": at_others[:6],
+        "speaker": str(qq),
+        "recent": [
+            {"who": str(r.get("name") or r.get("qq") or ""), "text": str(r.get("content") or "")[:160]}
+            for r in list(_recent.get(str(gid), []))[-8:]
+            if str(r.get("content") or "").strip()
+        ],
+    }
+    try:
+        raw = await asyncio.wait_for(
+            _utility_llm().chat(
+                [{"role": "system", "content": prompt},
+                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+                temperature=0.0,
+                max_tokens=220,
+                disable_thinking=True,
+                json_mode=True,
+            ), timeout=10,
+        )
+        obj = json.loads(raw)
+        confidence = float(obj.get("confidence") or 0)
+        if not obj.get("interject") or confidence < 0.8:
+            return False, ""
+        hint = str(obj.get("hint") or "").strip()[:200]
+        return True, hint or (
+            "这是别人之间的对话，你只是旁听；如果要接，只能轻轻接一句有分寸的旁听反应，"
+            "不要替被@的人回答，也不要把问题当成问自己。"
+        )
+    except Exception as error:
+        logger.debug(f"[chat] 旁听插话判断失败：{error}")
+        return False, ""
+
+
 async def _handle_group(
     bot: Bot,
     event: GroupMessageEvent,
@@ -7431,9 +7484,30 @@ async def _handle_group(
     at_others_direct = [x for x in _parse_at_qqs(event) if str(x) != str(bot.self_id)]
     if at_others_direct and not at_bot and quote_context:
         # 明确 @ 了别人、没有 @Bot：这是别人之间的对话，引用 Bot 只是引用材料。
-        # 安静旁听，不插入“我不替人答”之类的元对话，避免刷屏和破坏气氛。
-        logger.info(
-            f"[chat] 引用消息明确指向他人，保持静默 gid={gid} qq={qq} others={at_others_direct}"
+        # 只有引用的是 Bot 自己发的话，且语义判断适合时，才做一句简短旁听；
+        # 否则安静旁听，不能把问题当成问自己，也不能替被 @ 的人回答。
+        quoted_sender = str(_quote_sender_cache.get(str(quoted_msg_id)) or "")
+        if quoted_sender != str(bot.self_id):
+            logger.info(
+                f"[chat] 引用非Bot消息且指向他人，保持静默 gid={gid} qq={qq} others={at_others_direct}"
+            )
+            return
+        allowed, bystander_hint = await _judge_bystander(
+            gid, text, quote_context, [str(x) for x in at_others_direct], qq
+        )
+        if not allowed:
+            logger.info(
+                f"[chat] 引用Bot但本次不适合旁听插话，保持静默 gid={gid} qq={qq} others={at_others_direct}"
+            )
+            return
+        _bystander_last[str(gid)] = time.time()
+        logger.info(f"[chat] 引用Bot，允许一次旁听插话 gid={gid} qq={qq}")
+        await _respond(
+            bot, event, gid, qq, text, "auto", images, event.message_id,
+            quote_context=quote_context,
+            quoted_msg_id=quoted_msg_id,
+            favor_hint=bystander_hint,
+            forward_context=forward_context,
         )
         return
 
