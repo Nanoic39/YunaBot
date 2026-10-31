@@ -459,6 +459,7 @@ _self_sticker_last: dict[str, float] = {}  # 群/用户 -> 上次自绘时间
 _visible_events: dict[str, deque] = {}  # 群 -> 戳一戳/文件等可见事件
 _natural_image_tasks: set[asyncio.Task] = set()
 _natural_image_last: dict[str, float] = {}
+_group_names: dict[str, str] = {}  # gid -> 群名称缓存
 _emote_hash_index: dict[str, dict] | None = None  # 图片 hash -> 判断/收藏记录（懒加载）
 _emote_audit_task: asyncio.Task | None = (
     None  # 人工触发的已收藏表情审查任务（同时只跑一个）
@@ -6738,15 +6739,20 @@ def _maybe_schedule_spontaneous_sticker(bot: Bot, event: MessageEvent, gid, qq: 
     logger.info(f"[chat] 按概率触发自绘Q版表情 gid={gid} qq={qq} chance={chance}")
 
 
-def _image_group_context(gid: str, qq: str = "") -> str:
+def _image_group_context(gid: str, qq: str = "", group_name: str = "") -> str:
     if not gid:
         return "私聊场景，没有群聊背景。"
     group = _find_group(str(gid)) or {}
-    gname = str(group.get("name") or group.get("remark") or group.get("group_name") or gid)
+    gname = str(group_name or _group_names.get(str(gid)) or group.get("name") or group.get("remark") or group.get("group_name") or gid)
     users = _load_users()
     personas = _get_personas("group", str(gid))
     members = _collect_members(str(gid))
-    lines = [f"群名：{gname}"]
+    lines = [
+        f"群聊名称（必须原样使用）：{gname}",
+        "机器人本体：芸Yuna（Yuna），是 Bot，不是群成员；"
+        "她的固定视觉特征是深蓝绿色长发、绿色终端形发卡、白色水手服、白色长外套、浅蓝百褶裙、绿色点缀。"
+        "这个形象只能用于芸Yuna本人，绝不能安到任何群友身上。",
+    ]
     member_lines = []
     for mqq, mname in members[:24]:
         mqq = str(mqq)
@@ -6804,6 +6810,17 @@ async def _compose_image_prompt(user_request: str, context: str) -> dict:
         "必须忠实保留用户意图，不能把要求套成固定模板。默认图片中要包含清晰、准确的中文文字/标注；"
         "只有用户明确说不要文字时才省略。用户要求标注群友昵称或个人印象时，必须使用提供的真实昵称和已有印象，"
         "不能编造人物或乱改名字。判断是否需要结合机器人自己的立绘参考图（仅当用户要求画机器人本人/它的Q版形象时）。"
+        "严格区分机器人本体芸Yuna和群友：除非用户明确要求画机器人本人，否则不要给芸Yuna安排角色或画第二个芸Yuna；"
+        "所有群友必须按照提供的昵称与各自设定绘制，绝不能把芸Yuna的发色、绿色发卡、白大褂或水手服套到群友身上；"
+        "大肥鱼等群友是独立个体，不能画成芸Yuna。标签只能用提供的昵称，不得改名、缩写、合并或新增人物。"
+        "如果用户要求标注昵称，标签必须和人物一一对应且清晰可读；标签只写昵称，不加括号说明、称号或改写。"
+        "群聊名称/画面标题只能使用 context 里的真实群名，绝不能自行起名、改写，或把群里的口号/梗词当成群名；"
+        "用户没有要求标题时不要自创群名；背景里的梗口号最多作为聊天小字引用，不能当作群名。"
+        "画面中最多只能出现一个芸Yuna/Yuna；如果出现，必须只有一次且只标注她本人。"
+        "大肥鱼是独立群友，不是芸Yuna，不能使用芸Yuna的发色、发卡、白大褂、水手服或绿色蝴蝶结。"
+        "如果画面需要出现Yuna，就画且只画一个；群像需要体现你的视角时可以画一个Yuna作为叙述者，"
+        "但绝不能重复、分身，也不能把她和大肥鱼合并。"
+        "群背景里提到芸Yuna不等于要画第二个；只能用同一个Yuna承接。"
         "只输出 JSON：{\"prompt\":\"...\",\"use_reference\":true/false,\"reason\":\"...\"}。"
     )
     payload = {"request": str(user_request or "")[:2000], "context": str(context or "")[:9000], "default": default}
@@ -6828,7 +6845,7 @@ async def _compose_image_prompt(user_request: str, context: str) -> dict:
 
 async def _generate_natural_image(bot: Bot, event: MessageEvent, gid, qq: str, text: str, reply_prefix):
     try:
-        context = _image_group_context(str(gid or ""), str(qq or ""))
+        context = _image_group_context(str(gid or ""), str(qq or ""), str(getattr(event, "group_name", "") or ""))
         spec = await _compose_image_prompt(text, context)
         prompt = spec.get("prompt") or ""
         if not prompt:
@@ -7734,6 +7751,9 @@ async def _handle_group(
     images = images or []
     gid = str(event.group_id)
     qq = str(event.user_id)
+    group_name = str(getattr(event, "group_name", "") or "").strip()
+    if group_name:
+        _group_names[gid] = group_name
     if _find_group(gid) is None:
         return
 
