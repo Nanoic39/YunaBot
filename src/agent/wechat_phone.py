@@ -80,13 +80,13 @@ class WeChatPhone:
         await asyncio.sleep(0.3)
         await self._type(contact)
         await asyncio.sleep(1.0)
-        await self.phone.action({'action': 'tap', 'x': 300, 'y': 350})
+        await self.phone.action({'action': 'tap', 'x': 400, 'y': 500})
         await asyncio.sleep(0.8)
-        await self.phone.action({'action': 'tap', 'x': 500, 'y': 2410})
+        await self.phone.action({'action': 'tap', 'x': 500, 'y': 2580})
         await asyncio.sleep(0.3)
         await self._type(message)
         await asyncio.sleep(0.5)
         # 优先点发送按钮；微信输入栏高度固定，失败时用键盘回车兜底。
-        await self.phone.action({'action': 'tap', 'x': 1120, 'y': 2410})
+        await self.phone.action({'action': 'key', 'keycode': 66})
         await asyncio.sleep(0.5)
         return True
