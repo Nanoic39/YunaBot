@@ -2290,6 +2290,25 @@ def create_app(driver, root: Path = ROOT):
         audit(request, '切换微信白名单', id6)
         return {'ok': True}
 
+    @app.post('/api/wechat/send', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_send(body: dict, request: Request):
+        id6 = str(body.get('id6') or '').strip()
+        text = str(body.get('text') or '').strip()
+        if not id6 or not text or len(text) > 1000:
+            raise HTTPException(409, '需要联系人编号和 1–1000 字内容')
+        row = next((r for r in wechat_store.list_contacts(True) if r['id6'] == id6), None)
+        if not row:
+            raise HTTPException(409, '该联系人不在微信白名单')
+        from src.agent.wechat_phone import WeChatPhone
+        try:
+            ok = await WeChatPhone(phone_client).send(row['remark'] or row['nickname'], text)
+        except Exception as error:
+            raise HTTPException(409, f'微信发送失败：{type(error).__name__}') from error
+        if not ok:
+            raise HTTPException(409, '微信发送未完成')
+        audit(request, '微信白名单发送', id6)
+        return {'ok': True, 'id6': id6}
+
     @app.get('/api/wechat/groups', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def wechat_groups():
         return {'items': wechat_store.list_groups(), 'source': 'wechat'}

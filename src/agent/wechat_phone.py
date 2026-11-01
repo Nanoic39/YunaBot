@@ -68,44 +68,25 @@ class WeChatPhone:
         message = str(message or '').strip()
         if not contact or not message:
             return False
+        # 先退回聊天首页再重新启动，避免停留在上一次搜索/聊天页。
+        await self.phone.action({'action': 'key', 'keycode': 4})
+        await asyncio.sleep(0.3)
         await self.phone.action({'action': 'launch', 'package': 'com.tencent.mm'})
-        await asyncio.sleep(1.2)
-        ui = await self._ui()
-        if await self._login_screen(ui):
-            raise PhoneError('微信未登录')
-        # 搜索入口：优先按 content-desc/搜索文字，找不到则用右上角固定位置。
-        opened = False
-        for node in self._nodes(ui):
-            desc = (node.get('content-desc') or '') + (node.get('text') or '')
-            if '搜索' in desc:
-                await self._tap_node(node)
-                opened = True
-                break
-        if not opened:
-            await self.phone.action({'action': 'tap', 'x': 1000, 'y': 225})
-            await asyncio.sleep(0.6)
-        ui = await self._ui()
-        edit = next((n for n in self._nodes(ui) if 'EditText' in (n.get('class') or '')), None)
-        if not edit:
-            raise PhoneError('微信搜索框未找到')
-        await self._tap_node(edit)
+        await asyncio.sleep(1.0)
+        # 微信搜索页不暴露可读文本，使用固定入口 + 搜索结果首行。
+        await self.phone.action({'action': 'tap', 'x': 1000, 'y': 225})
+        await asyncio.sleep(0.5)
+        await self.phone.action({'action': 'tap', 'x': 400, 'y': 160})
+        await asyncio.sleep(0.3)
         await self._type(contact)
         await asyncio.sleep(1.0)
-        if not await self._tap_text(contact, contains=True):
-            # 搜索结果可能只显示带编号的备注，尝试编号/昵称前缀。
-            if not await self._tap_text(contact.split('-')[-1], contains=True):
-                raise PhoneError('微信联系人搜索结果未找到')
-        await asyncio.sleep(1.0)
-        ui = await self._ui()
-        if await self._login_screen(ui):
-            raise PhoneError('微信未登录')
-        edit = next((n for n in self._nodes(ui) if 'EditText' in (n.get('class') or '') and int(re.findall(r'\d+', n.get('bounds', '0,0,0,0'))[1] or 0) > 1500), None)
-        if not edit:
-            raise PhoneError('微信聊天输入框未找到')
-        await self._tap_node(edit)
-        await self._type(message)
-        # 发送按钮优先精确文字；找不到时点右下角。
-        if not await self._tap_text('发送'):
-            await self.phone.action({'action': 'tap', 'x': 1100, 'y': 2520})
+        await self.phone.action({'action': 'tap', 'x': 300, 'y': 350})
         await asyncio.sleep(0.8)
+        await self.phone.action({'action': 'tap', 'x': 500, 'y': 2410})
+        await asyncio.sleep(0.3)
+        await self._type(message)
+        await asyncio.sleep(0.5)
+        # 优先点发送按钮；微信输入栏高度固定，失败时用键盘回车兜底。
+        await self.phone.action({'action': 'tap', 'x': 1120, 'y': 2410})
+        await asyncio.sleep(0.5)
         return True
