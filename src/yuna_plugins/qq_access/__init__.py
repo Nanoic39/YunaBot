@@ -4,6 +4,8 @@ import importlib
 import json
 import time
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import weakref
 from pathlib import Path
 from nonebot import get_driver,get_bots,on_message,on_request,on_notice,require
@@ -38,18 +40,20 @@ async def notify(bot):
     key=(row['id'],owner)
     if time.time()<_retry.get(key,0):continue
     _retry[key]=time.time()+600
+    profile_name=''
     if not json.loads(row['notified']):
      try:
       profile=await asyncio.wait_for(bot.call_api('get_stranger_info',user_id=int(row['qq'])),4)
-      name=clean(profile.get('nickname',''),60)
-      if name:access_store.identify(row['id'],name);row['note']=name+'：'+row['note']
+      profile_name=clean(profile.get('nickname',''),60)
+      if profile_name:access_store.identify(row['id'],profile_name)
+      # 好友/私聊的 note 是纯文本；群邀请的 note 是 JSON 元数据，绝不能拼前缀破坏它。
+      if row['kind']!='group' and profile_name:row['note']=profile_name+'：'+row['note']
      except Exception:pass
-    who=row['qq']
+    who=profile_name or row['qq']
     if row['kind']=='group':
         meta=_group_meta(row)
         kind='邀请 bot 加入群' if meta.get('sub_type')!='add' else '申请让 bot 加入群'
-        text=(f'{who} {kind} {meta.get("gid") or "?"}。附言：{clean(meta.get("comment") or "",120) or "无"}\n'
-              f'回复「同意加群 #{row["id"]}」或「拒绝加群 #{row["id"]}」处理；不会自动同意。')
+        text=await _group_notification_text(bot,row,meta,kind,who)
     else:
         kind='想加我为好友' if row['kind']=='friend' else '私聊了我，但还没有聊天权限'
         text=f'{who} {kind}。附言摘要：{clean(row["note"],120)}\n请回复这条消息告诉我怎么处理（不引用的消息正常聊天）。可以只同意加好友（先聊三轮），也可以开放聊天，并指定每天额度。参考：轻量10000、常用50000 tokens；这是输入与输出合计，达到后暂停后续回复，单次可能越过阈值；不指定则不限。'
@@ -69,6 +73,79 @@ def _group_meta(row):
         return value if isinstance(value,dict) else {}
     except Exception:
         return {}
+
+
+def _fmt_ts(value) -> str:
+    try:
+        ts = float(value or 0)
+        if ts <= 0:
+            return "未知"
+        return datetime.fromtimestamp(ts, ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return "未知"
+
+
+async def _group_summary(bot, gid: str, meta: dict | None = None) -> dict:
+    meta = dict(meta or {})
+    info = {}
+    try:
+        info = await asyncio.wait_for(
+            bot.call_api("get_group_info", group_id=int(gid), no_cache=True), 6
+        ) or {}
+        if not isinstance(info, dict):
+            info = {}
+    except Exception as error:
+        logger.debug(f"[qq_access] 获取群信息失败：{type(error).__name__}")
+    data = {
+        "name": clean(info.get("group_name") or meta.get("group_name") or "", 60),
+        "count": info.get("member_count") or meta.get("member_count") or "?",
+        "max": info.get("max_member_count") or meta.get("max_member_count") or "?",
+        "owner": str(info.get("owner_id") or meta.get("owner_id") or ""),
+        "created": info.get("group_create_time") or meta.get("group_create_time") or 0,
+        "memo": clean(info.get("group_memo") or meta.get("group_memo") or "", 160),
+        "level": str(info.get("group_level") or meta.get("group_level") or ""),
+    }
+    if data.get("owner"):
+        try:
+            member = await asyncio.wait_for(
+                bot.call_api("get_group_member_info", group_id=int(gid), user_id=int(data["owner"]), no_cache=True), 3
+            ) or {}
+            data["owner_name"] = clean(member.get("card") or member.get("nickname") or "", 60)
+        except Exception:
+            data["owner_name"] = ""
+    return data
+
+
+def _group_info_text(gid: str, data: dict) -> str:
+    lines = [
+        f"群名：{data.get('name') or '未知'}",
+        f"群号：{gid}",
+        f"人数：{data.get('count')}/{data.get('max')}",
+    ]
+    if data.get("owner"):
+        owner = data['owner']
+        if data.get("owner_name"):
+            owner += f"（{data['owner_name']}）"
+        lines.append(f"群主：{owner}")
+    if data.get("created"):
+        lines.append(f"建群时间：{_fmt_ts(data['created'])}")
+    if data.get("level"):
+        lines.append(f"群等级：{data['level']}")
+    if data.get("memo"):
+        lines.append(f"群简介：{data['memo']}")
+    return "\n".join(lines)
+
+
+async def _group_notification_text(bot, row: dict, meta: dict, kind: str, inviter: str) -> str:
+    gid = str(meta.get("gid") or "")
+    data = await _group_summary(bot, gid, meta)
+    name = data.get("name") or "未知"
+    return (
+        f"{inviter}（{row.get('qq')}）{kind}：{name}\n"
+        + _group_info_text(gid, data)
+        + f"\n邀请附言：{clean(meta.get('comment') or '', 160) or '无'}\n"
+        + f"回复「同意加群 #{row['id']}」或「拒绝加群 #{row['id']}」处理；管理员未同意前不会自动入群。"
+    )
 
 
 def _request_line(index,row):
@@ -287,7 +364,7 @@ async def greet(bot,qq):
    name=clean(profile.get('nickname',''),30)
   except Exception:pass
   # 固定两段问候；不让模型自由发挥成“哥哥你来啦/一直在等你”。
-  text=f'嗨！{name or "你"}[[SPLIT]]我是清汐，请问有什么事？'
+  text=f'嗨！{name or "你"}[[SPLIT]]我是Yuna，请问有什么事？'
   try:
    for part in text.split('[[SPLIT]]'):
     await bot.send_private_msg(user_id=int(qq),message=MessageSegment.text(part))
@@ -304,13 +381,15 @@ async def added(bot:Bot,event):
   # 管理员已同意并走 set_group_add_request 时会有 done 记录，允许正常入群。
   if row and row.get('state')=='done':
    return
-  # 未同意就被拉进来：立即退出，等待管理员决定。
+  # 未同意就被拉进来：先读取群信息，再退出并等待管理员决定。
+  summary=await _group_summary(bot,gid)
   try:
    await asyncio.wait_for(bot.set_group_leave(group_id=int(gid)),10)
   except Exception as error:
    logger.warning(f'[qq_access] 强制入群后退出失败：{type(error).__name__}')
   if not row or row.get('state') not in ('pending','executing'):
-   meta={'gid':gid,'sub_type':'forced','inviter':str(getattr(event,'operator_id','') or ''),'comment':'被强制拉入，已退出等待管理员同意'}
+   meta={'gid':gid,'sub_type':'forced','inviter':str(getattr(event,'operator_id','') or ''),'comment':'被强制拉入，已退出等待管理员同意',
+         'group_name':summary.get('name') or '','member_count':summary.get('count') or '','max_member_count':summary.get('max') or '','owner_id':summary.get('owner') or '','group_create_time':summary.get('created') or 0,'group_memo':summary.get('memo') or '','group_level':summary.get('level') or ''}
    access_store.request(account,str(getattr(event,'operator_id','') or event.user_id),'group','',json.dumps(meta,ensure_ascii=False),force=True)
   await notify(bot)
   await _send_inviter(bot,str(getattr(event,'operator_id','') or event.user_id),f'bot 已被强制拉入群 {gid}，管理员尚未同意，已先退出；同意后再邀请。')

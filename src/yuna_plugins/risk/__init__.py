@@ -59,7 +59,7 @@ _TARGET_ALIASES = {
     "speaker": "self", "author": "self", "myself": "self",
     "everyone": "group", "all": "group", "unknown": "unspecified", "none": "unspecified",
 }
-_BOT_NAME_RE = re.compile(r"(芸?清汐|Yuna|yuna|你这个?(?:bot|机器人|AI)|你(?:这|个)?(?:AI|ai)|你)", re.I)
+_BOT_NAME_RE = re.compile(r"(芸?Yuna|Yuna|yuna|你这个?(?:bot|机器人|AI)|你(?:这|个)?(?:AI|ai)|你)", re.I)
 _OTHER_TARGET_RE = re.compile(r"(他|她|他们|她们|别人|群友|某人|楼上|楼下|这家伙|那家伙|那个人|"
                              r"ChatGPT|GPT|Claude|文心一言|豆包|其他AI|别的AI|@\d{5,}|\[CQ:at,qq=\d+)", re.I)
 _SELF_TARGET_RE = re.compile(r"(我自己|自己|本人|我(?=妈|家|的|是|被|这|那|真|又|才|就|在|被))")
