@@ -99,17 +99,8 @@ async def _poll() -> None:
             if not reply:
                 continue
             try:
-                vision = None
-                try:
-                    import importlib
-                    chat = importlib.import_module('src.yuna_plugins.chat')
-                    vision, _ = chat._vision_client('', 'image')
-                except Exception:
-                    vision = None
-                if vision is not None and getattr(vision, 'available', False):
-                    await WeChatVision(agent.phone, vision).send(title, reply)
-                else:
-                    await WeChatPhone(agent.phone).send(title, reply)
+                # 先走已验证的已有会话+绿色按钮路径；视觉 Skill 只保留为后续回退。
+                await asyncio.wait_for(WeChatPhone(agent.phone).send(title, reply), 90)
                 _SEEN[key] = now
                 with wechat_store.db() as d:
                     d.execute('INSERT INTO messages(contact_id6,direction,text,created) VALUES(?,?,?,?)',
