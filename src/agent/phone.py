@@ -40,17 +40,20 @@ class PhoneClient:
         data = response.json()
         return {"ok": True, **data, "url": self.url}
 
-    async def observe(self) -> dict:
-        """一次请求同时取截图、UI 和尺寸，减少真机往返延迟。"""
+    async def observe(self, fast: bool = False) -> dict:
+        """一次请求同时取截图、UI 和尺寸；fast=True 时先跳过慢速截图。"""
         import base64
         async with self._client() as client:
-            response = await client.get(self.url + "/observe", headers=self._headers(), timeout=45)
+            response = await client.get(self.url + "/observe" + ("?fast=1" if fast else ""),
+                                        headers=self._headers(), timeout=45)
         if response.status_code != 200:
             raise PhoneError(f"手机观察失败（HTTP {response.status_code}）")
         data = response.json()
         try:
             image = base64.b64decode(data.get("screenshot") or "", validate=True)
-            if not image.startswith(b"\x89PNG\r\n\x1a\n") or not isinstance(data.get("ui"), str):
+            if image and not image.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("invalid observation")
+            if not isinstance(data.get("ui"), str):
                 raise ValueError("invalid observation")
         except (ValueError, TypeError) as error:
             raise PhoneError("手机观察数据无效") from error

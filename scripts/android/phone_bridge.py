@@ -9,6 +9,7 @@ TOKEN_FILE = ROOT + "/bridge/token"
 AUDIT = ROOT + "/bridge/audit.jsonl"
 APKS = ROOT + "/apks"
 ADB = os.getenv("ADB_BIN") or (ROOT + "/sdk/platform-tools/adb")
+_OBS_CACHE = {"size": "", "activity": "", "time": 0.0}
 # 真机可填 Tailscale/内网 IP:端口，例如 100.x.x.x:5555；不要求手机接在电脑上。
 SERIAL = os.getenv("ANDROID_SERIAL") or os.getenv("PHONE_ADB_SERIAL") or "172.31.99.2:5555"
 ENV = {**os.environ, "HOME": ROOT + "/home", "ANDROID_HOME": ROOT + "/sdk",
@@ -111,18 +112,26 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as error:
                     return self.send_json(200, {"ok": True, "online": False, "serial": SERIAL,
                                                 "error": str(error)[:300]})
-            if self.path == "/observe":
-                top = shell("dumpsys", "activity", "activities").decode("utf-8", "ignore")
-                activity = next((line.strip() for line in top.splitlines() if "mResumedActivity" in line), "")
-                size = shell("wm", "size").decode().strip()
+            if self.path.startswith("/observe"):
+                fast = "fast=1" in self.path
+                import time as _time
+                now = _time.monotonic()
+                if not _OBS_CACHE["size"] or now - _OBS_CACHE["time"] > 30:
+                    _OBS_CACHE["size"] = shell("wm", "size").decode().strip()
+                    try:
+                        top = shell("dumpsys", "activity", "activities").decode("utf-8", "ignore")
+                        _OBS_CACHE["activity"] = next((line.strip() for line in top.splitlines() if "mResumedActivity" in line), "")
+                    except Exception:
+                        _OBS_CACHE["activity"] = ""
+                    _OBS_CACHE["time"] = now
                 shell("uiautomator", "dump", "/sdcard/yuna-observe.xml", timeout=60)
                 ui = shell("cat", "/sdcard/yuna-observe.xml", timeout=30).decode("utf-8", "ignore")
                 if len(ui) > 1048576:
                     raise ValueError("界面结构超过安全大小限制")
                 ET.fromstring(ui)
-                raw = adb("exec-out", "screencap", "-p", timeout=90)
+                raw = b"" if fast else adb("exec-out", "screencap", "-p", timeout=90)
                 return self.send_json(200, {"ok": True, "online": True, "screenshot": base64.b64encode(raw).decode("ascii"),
-                                            "ui": ui, "size": size, "activity": activity})
+                                            "ui": ui, "size": _OBS_CACHE["size"], "activity": _OBS_CACHE["activity"]})
             if self.path == "/screenshot":
                 raw = adb("exec-out", "screencap", "-p", timeout=90)
                 self.send_response(200)

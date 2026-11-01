@@ -295,6 +295,24 @@ class PhoneAgent:
         parts.append("【口吻】thought 和 finish 的 summary 都用你的第一人称口吻，像你自己随手记的话，不要机器腔。")
         return '\n\n'.join(parts)
 
+    @staticmethod
+    def _compact_ui(ui: str, limit: int = 4500) -> str:
+        try:
+            lines = []
+            for node in ET.fromstring(ui or '<hierarchy/>').iter('node'):
+                text = (node.get('text') or node.get('content-desc') or '').strip()
+                if not text:
+                    continue
+                bounds = node.get('bounds') or ''
+                cls = node.get('class') or ''
+                tag = ' [输入框]' if 'EditText' in cls else ''
+                lines.append(f'{text}{tag} @ {bounds}')
+                if len('\n'.join(lines)) >= limit:
+                    break
+            return '\n'.join(lines)[:limit] or '(无文字控件)'
+        except Exception:
+            return str(ui or '')[:limit]
+
     def _prompt(self, task, observation):
         self_block = (task.get('self_context') or '')+'\n【共享的当前状态】\n'+self.self_memory.continuity_text()
         try:
@@ -372,7 +390,7 @@ class PhoneAgent:
 {history_text}
 
 界面结构（可能截断）：
-{observation.get('ui', '')[:14000]}
+{self._compact_ui(observation.get('ui', ''))}
 
 只输出一个 JSON 对象。''' 
 
@@ -380,8 +398,17 @@ class PhoneAgent:
         if not task.get('phase') or task.get('phase')=='accepted':self._checkpoint(task,'observing','读取实际界面')
         self.self_memory.update_activity(task.get('id'),task.get('status') if task.get('status') in ('running','waiting_aid') else 'running')
         if callable(getattr(self.phone,'observe',None)):
-            snapshot=await self.phone.observe()
+            # 文字界面先用快速观察（不做 15 秒级 screencap）；无文字或需要视觉时再补图。
+            snapshot=await self.phone.observe(fast=True)
             health=snapshot; screenshot=snapshot['screenshot']; ui=snapshot['ui']
+            if not screenshot:
+                try:
+                    has_text = any((n.get('text') or n.get('content-desc')) for n in ET.fromstring(ui).iter('node'))
+                except ET.ParseError:
+                    has_text = False
+                if not has_text:
+                    snapshot=await self.phone.observe()
+                    health=snapshot; screenshot=snapshot['screenshot']; ui=snapshot['ui']
         else:
             health = await self.phone.health()
             screenshot = await self.phone.screenshot()
@@ -436,6 +463,16 @@ class PhoneAgent:
                 task['screenshot'] = screenshot
             except Exception:
                 pass
+        # 给模型发送压缩图，保留完整图用于证据/发布核验，降低每步视觉请求延迟。
+        if screenshot:
+            try:
+                from PIL import Image
+                picture = Image.open(io.BytesIO(screenshot)).convert('RGB')
+                picture.thumbnail((900, 1900))
+                out = io.BytesIO(); picture.save(out, format='JPEG', quality=80, optimize=True)
+                task['model_screenshot'] = out.getvalue()
+            except Exception:
+                task['model_screenshot'] = screenshot
         task['ui'] = ui
         try:
             seen=task.setdefault('seen_texts',set())
@@ -973,7 +1010,7 @@ class PhoneAgent:
                 task['status'] = 'running'
                 task['step'] += 1
                 try:
-                    decision = await self.llm.decide(self._prompt(task, observation), task['screenshot'])
+                    decision = await self.llm.decide(self._prompt(task, observation), task.get('model_screenshot') or task['screenshot'])
                 except AgentLLMError as error:
                     task['status'] = 'failed'
                     task['error'] = str(error)
@@ -1093,6 +1130,7 @@ class PhoneAgent:
             task.pop('owner_guidance', None)
             task.pop('_phone_input', None)
             task.pop('raw_ui', None)
+            task.pop('model_screenshot', None)
             task['waiting_for_aid'] = ''
             if self.play is not None:
                 # 登录/密码类失败和已完成任务不自动续接，避免反复要密码。
