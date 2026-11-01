@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import re
@@ -72,15 +73,58 @@ def clean_gemini_output(text: str, json_mode: bool = False) -> str:
                 return raw[start:].strip()
             except Exception:
                 continue
-    blocks = [block.strip() for block in re.split(r"\n\s*\n", raw) if block.strip()]
     markers = ("my analysis", "my processing", "my immediate response", "okay,", "okay the",
                "the user wants", "the user's", "i need to", "i should", "let me", "first,",
-               "we need", "here's how", "here is how", "**my ", "**final answer", "final answer:")
+               "we need", "here's how", "here is how", "**my ", "**final answer", "final answer:",
+               "it is simple", "hopefully", "i'm not overthinking", "this conveys", "looks good",
+               "the response is", "i'll keep it", "i will keep it")
+    has_cjk = _cjk_ratio(raw) > 0.05
+
+    def normalize_line(value: str) -> str:
+        value = re.sub(r"^[\s\"“”‘’']+|[\s\"“”‘’']+$", "", str(value or ""))
+        value = re.sub(r"\[\[(?:EMOTE|MISC)[^\]]*\]\]", "", value)
+        return re.sub(r"[\W_]+", "", value).lower()
+
+    def clean_lines(value: str) -> list[str]:
+        result = []
+        seen: list[str] = []
+        for line in str(value or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            low = line.lower()
+            # 有中文正文时，纯英文的思考/自评行直接丢弃；不要把它当角色台词。
+            if has_cjk and _cjk_ratio(line) < 0.03 and len(line) >= 12:
+                continue
+            if any(marker in low for marker in markers):
+                continue
+            key = normalize_line(line)
+            if not key:
+                continue
+            duplicate = False
+            for previous in seen:
+                if key == previous:
+                    duplicate = True
+                    break
+                if len(key) >= 10 and len(previous) >= 10:
+                    ratio = difflib.SequenceMatcher(None, key, previous).ratio()
+                    if ratio >= 0.9 and min(len(key), len(previous)) / max(len(key), len(previous)) >= 0.75:
+                        duplicate = True
+                        break
+            if duplicate:
+                continue
+            seen.append(key)
+            result.append(line)
+        return result
+
+    lines = clean_lines(raw)
+    if has_cjk and lines:
+        return "\n".join(lines).strip()
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", raw) if block.strip()]
     for index, block in enumerate(blocks):
         low = block.lower()
         if _cjk_ratio(block) >= 0.22 and not any(marker in low for marker in markers):
             return "\n\n".join(blocks[index:]).strip()
-    # 没有中文正文（例如用户明确要求英文）时，丢掉明显的 reasoning 前缀，保留最后一段。
     if any(marker in blocks[0].lower() for marker in markers) and len(blocks) > 1:
         return blocks[-1].strip()
     return raw

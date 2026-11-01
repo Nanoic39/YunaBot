@@ -5515,9 +5515,72 @@ _REASONING_CUE = re.compile(
 )
 
 
+_ENGLISH_REASONING_CUE = re.compile(
+    r"(my analysis|my processing|my immediate response|the user wants|the user's|"
+    r"i need to|i should|let me|we need|here's how|here is how|final answer|"
+    r"it is simple|hopefully|i'm not overthinking|this conveys|the response is|"
+    r"looks good|i'll keep it|i will keep it)",
+    re.I,
+)
+
+
+def _text_cjk_ratio(text: str) -> float:
+    raw = str(text or "")
+    if not raw:
+        return 0.0
+    return sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff") / max(1, len(raw))
+
+
+def _normalize_reply_key(text: str) -> str:
+    value = re.sub(r"^[\s\"“”‘’']+|[\s\"“”‘’']+$", "", str(text or ""))
+    value = re.sub(r"\[\[(?:EMOTE|MISC)[^\]]*\]\]", "", value)
+    return re.sub(r"[\W_]+", "", value).lower()
+
+
+def _strip_outer_quotes(text: str) -> str:
+    return re.sub(r"^[\s\"'“”‘’]+|[\s\"'“”‘’]+$", "", str(text or "")).strip()
+
+
+def _dedupe_reply_parts(parts: list[str]) -> list[str]:
+    """去掉模型重复输出的句子（含近似重复），保留一份；不合并不同内容。"""
+    result: list[str] = []
+    keys: list[str] = []
+    for part in parts or []:
+        text = str(part or "").strip()
+        if not text:
+            continue
+        key = _normalize_reply_key(text)
+        if not key:
+            continue
+        duplicate = -1
+        for index, previous in enumerate(keys):
+            if key == previous:
+                duplicate = index
+                break
+            if len(key) >= 10 and len(previous) >= 10:
+                ratio = difflib.SequenceMatcher(None, key, previous).ratio()
+                if ratio >= 0.9 and min(len(key), len(previous)) / max(len(key), len(previous)) >= 0.75:
+                    duplicate = index
+                    break
+        if duplicate >= 0:
+            previous = result[duplicate]
+            # 保留信息更多的一份；去掉模型给同一句套上的外层引号
+            if len(key) > len(keys[duplicate]):
+                result[duplicate] = _strip_outer_quotes(text)
+                keys[duplicate] = key
+            elif len(key) == len(keys[duplicate]):
+                result[duplicate] = _strip_outer_quotes(previous)
+            continue
+        result.append(text)
+        keys.append(key)
+    return result
+
+
 def _strip_reasoning_lines(text: str) -> tuple[str, bool]:
-    """去掉模型外露的第三人称分析/计划行；返回(清理结果, 是否命中线索)。"""
-    lines = str(text or "").splitlines()
+    """去掉模型外露的分析/计划/英文自评行；返回(清理结果, 是否命中线索)。"""
+    raw_text = str(text or "")
+    has_cjk = _text_cjk_ratio(raw_text) > 0.05
+    lines = raw_text.splitlines()
     kept: list[str] = []
     removed = 0
     cue_seen = False
@@ -5525,11 +5588,19 @@ def _strip_reasoning_lines(text: str) -> tuple[str, bool]:
         raw = line.strip()
         if not raw:
             continue
-        if _REASONING_CUE.search(raw):
+        if _REASONING_CUE.search(raw) or (has_cjk and _ENGLISH_REASONING_CUE.search(raw)):
             cue_seen = True
             removed += 1
             continue
-        kept.append(raw)
+        # 有中文正文时，纯英文的内心独白/自评不进入台词。
+        if has_cjk and _text_cjk_ratio(raw) < 0.02 and len(raw) >= 10:
+            cue_seen = True
+            removed += 1
+            continue
+        raw = re.sub(r"^[\s\"“”‘’']+|[\s\"“”‘’']+$", "", raw).strip()
+        if raw:
+            kept.append(raw)
+    kept = _dedupe_reply_parts(kept)
     if removed and not kept:
         return "", cue_seen
     return "\n".join(kept), cue_seen
@@ -6460,6 +6531,7 @@ async def _send_split_reply(bot: Bot, event: MessageEvent, response: str, prefix
     if chat_config.chat_humanize_enabled:
         parts = split_naturally(parts, chat_config.chat_split_probability)
     parts = [part for part in (parts or []) if _meaningful_part(part)]
+    parts = _dedupe_reply_parts(parts)
     if not parts:
         return []
     await bot.send(event, (prefix or "") + MessageSegment.text(parts[0]))
@@ -7322,6 +7394,7 @@ async def _respond(
     if chat_config.chat_humanize_enabled:
         parts_msg = split_naturally(parts_msg, chat_config.chat_split_probability)
     parts_msg = [part for part in parts_msg if _meaningful_part(part)]
+    parts_msg = _dedupe_reply_parts(parts_msg)
     if parts_msg:
         memory_text = "\n".join(parts_msg)
         await _human_pause(response, trigger, gen_started)
