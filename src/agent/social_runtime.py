@@ -69,6 +69,9 @@ async def start_setup(agent):
     setup['status']='in_progress';setup['task_id']=started['id'];path.write_text(json.dumps(setup,ensure_ascii=False));return True
 
 async def tick():
+    # 默认关闭“反复查看自己帖子”的自动轮询；只在明确启用时运行。
+    if os.getenv('SOCIAL_AUTO_POLL', '0') != '1':
+        return
     global _setup_aid
     # 每日手机自由活动期间，不让小黑盒评论/发帖任务抢占同一台真机。
     session = phone_play.snapshot().get('session') or {}

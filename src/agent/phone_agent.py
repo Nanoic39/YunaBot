@@ -216,6 +216,10 @@ class PhoneAgent:
             task['resumed_from']=resume_task_id
             task['aid_answers']={str(k):str(v)[:500] for k,v in (source.get('aid_answers') or {}).items()
                                  if str(k).startswith('manual|')}
+        if payment_test:
+            # 每次新的 1 元测试都允许重新发起一次支付密码请求；旧测试的“已请求”不能阻塞新订单。
+            task['password_requested'] = False
+            task.setdefault('payment_test_authorized', True)
         task['self_context'] = self._self_context()
         # 跨场景捎话：把群聊/面板托付给「服务器」的消息带给这次任务
         try:
@@ -749,6 +753,22 @@ class PhoneAgent:
                 decision = {**decision, 'x': point[0], 'y': point[1]}
             x, y = int(decision['x']), int(decision['y'])
             label = self._tap_label(task.get('ui', ''), x, y)
+            # 网页占位文字常是 EditText 下方的 TextView；点占位文字不会聚焦。
+            # 金额/输入类占位命中时，自动改为最近的 EditText 中心。
+            if re.search(r'金额|请输入|输入框', label):
+                try:
+                    edits = []
+                    for node in ET.fromstring(task.get('ui') or '<hierarchy/>').iter('node'):
+                        if 'EditText' not in (node.get('class') or ''):
+                            continue
+                        b = [int(v) for v in re.findall(r'\d+', node.get('bounds') or '')]
+                        if len(b) == 4:
+                            edits.append(((b[0] + b[2]) // 2, (b[1] + b[3]) // 2))
+                    if edits:
+                        x, y = min(edits, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2)
+                        label = '金额输入框' if '金额' in label else label
+                except (ValueError, ET.ParseError):
+                    pass
             if re.fullmatch(r'获取验证码|发送验证码|重新获取验证码|重新发送验证码', label):
                 raw = task.get('raw_ui') or task.get('ui') or '<hierarchy/>'
                 nodes = [n for n in ET.fromstring(raw).iter('node') if 'EditText' in n.get('class','') and re.search(r'phone|mobile|tel|et_number', n.get('resource-id','').lower())]
