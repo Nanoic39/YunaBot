@@ -36,6 +36,7 @@ from src.agent.computer import ComputerClient, ComputerAgent
 from src.agent.phone_agent import PhoneAgent, RealPhoneAgent, PhoneTaskError
 from src.agent.phone_play import PhonePlayError, phone_play
 from src.agent.wechat import wechat_store
+from src.agent.skills import skill_store
 from src.agent.runtime import set_phone_agent
 from src.agent.social import social_store, SocialError
 from src.agent.social_runtime import request_setup as request_social_setup, start_setup as start_social_setup
@@ -1942,6 +1943,7 @@ def create_app(driver, root: Path = ROOT):
             job['has_screenshot'] = bool(result and result.get('has_screenshot'))
         return {**runtime, 'policy': data['policy'], 'providers': PROVIDERS,
                 'phone_tasks': phone_agent.list_tasks()[:30],
+                'skills': skill_store.snapshot(30),
                 'tasks': [task_summary(t) for t in data['tasks'] if not is_payment(t)],
                 'grants': [g for g in data['grants'] if not is_payment(g)],
                 'capabilities': [c for c in data['capabilities'] if not is_payment({'capability': c['id']})],

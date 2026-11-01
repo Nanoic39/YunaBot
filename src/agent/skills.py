@@ -30,6 +30,25 @@ class SkillStore:
         except Exception:
             return ''
 
+    def snapshot(self, limit: int = 50) -> list[dict]:
+        rows = []
+        for path in sorted(self.path.glob('*.json')):
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            successes = data.get('successes') or []
+            if not successes:
+                continue
+            last = successes[-1]
+            rows.append({'name': data.get('name') or path.stem,
+                         'successes': len(successes),
+                         'last_goal': str(last.get('goal') or '')[:160],
+                         'steps': last.get('steps') or [],
+                         'time': last.get('time') or 0})
+        rows.sort(key=lambda r: float(r.get('time') or 0), reverse=True)
+        return rows[:max(1, min(100, int(limit)))]
+
     def record(self, name: str, goal: str, steps: list[str]) -> None:
         try:
             path = self._file(name)
