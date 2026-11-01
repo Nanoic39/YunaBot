@@ -2318,8 +2318,19 @@ def create_app(driver, root: Path = ROOT):
         if not row:
             raise HTTPException(409, '该联系人不在微信白名单')
         from src.agent.wechat_phone import WeChatPhone
+        from src.agent.wechat_vision import WeChatVisionSkill
         try:
-            ok = await WeChatPhone(phone_client).send(row['remark'] or row['nickname'], text)
+            vision = None
+            try:
+                import importlib
+                chat_module = importlib.import_module('src.yuna_plugins.chat')
+                vision, _ = chat_module._vision_client('', 'image')
+            except Exception:
+                vision = None
+            if vision is not None and getattr(vision, 'available', False):
+                ok = await WeChatVisionSkill(phone_client, vision).send(row['remark'] or row['nickname'], text)
+            else:
+                ok = await WeChatPhone(phone_client).send(row['remark'] or row['nickname'], text)
         except Exception as error:
             raise HTTPException(409, f'微信发送失败：{type(error).__name__}') from error
         if not ok:

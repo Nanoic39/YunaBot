@@ -94,3 +94,35 @@ class WeChatVision:
             else:
                 await asyncio.sleep(0.5)
         raise PhoneError('微信视觉步骤超限')
+
+
+class WeChatVisionSkill:
+    """Vision/back-navigation WeChat sender with learned skill notes."""
+
+    def __init__(self, phone: PhoneClient, vision):
+        self.phone = phone
+        self.vision = vision
+
+    async def send(self, contact: str, message: str) -> bool:
+        from .phone_vision import PhoneVisionSkill
+        from .wechat_phone import WeChatPhone
+        contact = str(contact or '').strip()
+        message = str(message or '').strip()
+        if not contact or not message:
+            return False
+        await self.phone.action({'action': 'force_stop', 'package': 'com.tencent.mm'})
+        await asyncio.sleep(0.8)
+        await self.phone.action({'action': 'launch', 'package': 'com.tencent.mm'})
+        await asyncio.sleep(1.2)
+        goal = (
+            f'在微信里给联系人「{contact}」发送消息「{message}」。'
+            '微信可能停在聊天列表、搜索页、搜索结果、联系人选择页或聊天页。'
+            '必须先回到聊天列表或搜索并进入真正的聊天窗口，不能停在「选择联系人」页。'
+            '如果搜索后打开的是联系人选择页或转发页，按 back 返回，再从聊天列表进入。'
+            '进入聊天后点底部输入框，输入消息，发送按钮应出现在输入框右侧，绿色背景白色文字。'
+            '只有发送按钮出现并点击后，聊天区出现这条消息才算 done。'
+        )
+        checker = WeChatPhone(self.phone)
+        await PhoneVisionSkill(self.phone, self.vision, 'wechat_send').run(
+            goal, max_steps=18, verify=lambda: checker._verify_sent(message))
+        return True
