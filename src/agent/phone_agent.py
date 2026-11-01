@@ -44,7 +44,7 @@ def _login_ui(ui: str) -> bool:
 
 class PhoneAgent:
     def __init__(self, phone: PhoneClient, llm: AgentLLM, *, max_steps: int = 24,
-                 timeout: int = 1800, play=_DEFAULT_PLAY, history_path=None,
+                 timeout: int = 7200, play=_DEFAULT_PLAY, history_path=None,
                  self_memory=None, persona_loader=None):
         self.phone = phone
         self.llm = llm
@@ -174,8 +174,8 @@ class PhoneAgent:
         except Exception as error:
             raise PhoneTaskError(f'手机桥不可达，任务未创建：{type(error).__name__}') from error
         steps = self.max_steps if max_steps is None else max_steps
-        if type(steps) is not int or not 1 <= steps <= 60:
-            raise PhoneTaskError('步骤上限应为1到60')
+        if type(steps) is not int or not 1 <= steps <= 240:
+            raise PhoneTaskError('步骤上限应为1到240')
         source=None
         if resume_task_id is not None:
             source=self.tasks.get(resume_task_id)

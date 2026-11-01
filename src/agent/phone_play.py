@@ -9,8 +9,8 @@ import time
 from pathlib import Path
 
 TZ_OFFSET = 8
-MIN_MINUTES = 5
-MAX_MINUTES = 240
+MIN_MINUTES = 1
+MAX_MINUTES = 1440
 
 
 class PhonePlayError(ValueError):
@@ -60,7 +60,7 @@ class PhonePlayStore:
                 self.data['status'] = 'idle'
                 self.data['last'] = {'status': 'ended', 'time': now, 'reason': 'time_up'}
                 self.data['session'] = {}
-                self.data['cooldown_until'] = now + 90 * 60
+                self.data['cooldown_until'] = 0
                 self._save()
 
     def snapshot(self):
@@ -182,7 +182,7 @@ class PhonePlayStore:
                 return self.snapshot()
             self.data.update({'status': 'idle', 'request': {}, 'session': {},
                               'last': {'status': 'ended', 'time': self.clock(), 'reason': str(reason)[:100]},
-                              'cooldown_until': self.clock() + 90 * 60,
+                              'cooldown_until': 0,
                               'retry_at': 0, 'retry_plan': '', 'retry_duration': 20, 'retry_resume_task_id':None, 'retry_resume_guidance':''})
             self._save()
             return self.snapshot()

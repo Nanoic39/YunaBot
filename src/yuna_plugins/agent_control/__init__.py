@@ -461,6 +461,19 @@ async def start_phone_session_task(resume_note=''):
     session = snapshot.get('session') or {}
     plan = session.get('plan') or ''
     resume = snapshot.get('resume_goal') or ''
+    if resume and not resume_note:
+        # 中断后的下一次自由活动，由她自己决定继续还是放下，而不是永远自动续命。
+        try:
+            decision = await asyncio.wait_for(agent.llm.decide(
+                '你上次的手机任务被中断了。现在你有一次新的自由活动时间，可以决定继续上次的事，'
+                '或者放下它开始新的安排。只输出 JSON：{"continue":true/false,"reason":"不超过80字"}。'
+                f'上次未完成：{resume[:800]}'
+            ), 15)
+            if decision.get('continue') is False:
+                phone_play.set_resume('')
+                resume = ''
+        except Exception:
+            pass
     if resume_note:
         # 重启衔接：明确告诉模型刚才是重启后接续，未确认的操作要重新做
         goal = (f'{plan or "继续玩电脑"}（服务刚重启过，接续之前的进度；上次没做完的是：{resume_note}。'
@@ -796,7 +809,7 @@ async def _run_daily_phone(agent) -> bool:
         return False
     selected = [a for a in apps if a['label'] in chosen or a['package'] in chosen][:3]
     package_hint = '；'.join(f"{a['label']}={a['package']}" for a in selected)
-    minutes = max(5, min(30, int(os.getenv('AGENT_PHONE_DAILY_MINUTES', '20'))))
+    minutes = max(1, min(1440, int(os.getenv('AGENT_PHONE_DAILY_MINUTES', '30'))))
     goal = (
         f'今天是每日手机自由活动。计划：{plan}。'
         + (f'优先从这些已安装应用启动：{package_hint}。' if package_hint else '')

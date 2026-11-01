@@ -1,6 +1,6 @@
 """受限的 Android 手机控制桥；仅监听 127.0.0.1，不提供任意 shell。"""
 from __future__ import annotations
-import json, os, re, secrets, subprocess, time, shlex
+import base64, json, os, re, secrets, subprocess, time, shlex
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -107,6 +107,18 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as error:
                     return self.send_json(200, {"ok": True, "online": False, "serial": SERIAL,
                                                 "error": str(error)[:300]})
+            if self.path == "/observe":
+                top = shell("dumpsys", "activity", "activities").decode("utf-8", "ignore")
+                activity = next((line.strip() for line in top.splitlines() if "mResumedActivity" in line), "")
+                size = shell("wm", "size").decode().strip()
+                shell("uiautomator", "dump", "/sdcard/yuna-observe.xml", timeout=60)
+                ui = shell("cat", "/sdcard/yuna-observe.xml", timeout=30).decode("utf-8", "ignore")
+                if len(ui) > 1048576:
+                    raise ValueError("界面结构超过安全大小限制")
+                ET.fromstring(ui)
+                raw = adb("exec-out", "screencap", "-p", timeout=90)
+                return self.send_json(200, {"ok": True, "online": True, "screenshot": base64.b64encode(raw).decode("ascii"),
+                                            "ui": ui, "size": size, "activity": activity})
             if self.path == "/screenshot":
                 raw = adb("exec-out", "screencap", "-p", timeout=90)
                 self.send_response(200)
