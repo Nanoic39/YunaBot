@@ -92,9 +92,91 @@ def _same_game_name(a: str, b: str) -> bool:
     return any(x in aa for x in aliases) and any(x in bb for x in aliases)
 
 
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _cn_number(value: str) -> int | None:
+    value = str(value or "").strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return int(value)
+    if value in _CN_DIGITS:
+        return _CN_DIGITS[value]
+    if len(value) == 2 and value[1] == "十" and value[0] in _CN_DIGITS:
+        return _CN_DIGITS[value[0]] * 10
+    if len(value) == 2 and value[0] == "十" and value[1] in _CN_DIGITS:
+        return 10 + _CN_DIGITS[value[1]]
+    if len(value) == 3 and value[0] in _CN_DIGITS and value[1] == "十" and value[2] in _CN_DIGITS:
+        return _CN_DIGITS[value[0]] * 10 + _CN_DIGITS[value[2]]
+    if len(value) == 2 and value[0] == "零" and value[1] in _CN_DIGITS:
+        return _CN_DIGITS[value[1]]
+    return None
+
+
+def parse_explicit_start(text, now=None):
+    """明确写了“今晚九点/九点半/21:00”时，以原文为准，避免模型把分钟算错。"""
+    raw = str(text or "")
+    if re.search(r"明晚|明天|次日|后天", raw):
+        return None
+    m = re.search(
+        r"(?:(今|明)?(?:天)?(?:晚上|晚|今)?\s*)?"
+        r"(上午|早上|早晨|下午|傍晚|晚上|晚)?\s*"
+        r"([零〇一二两三四五六七八九十]{1,3}|\d{1,2})\s*(?:点|时|:)\s*"
+        r"(半|一刻|三刻|[零〇一二两三四五六七八九十]{1,3}|\d{1,2})?\s*(?:分)?",
+        raw,
+    )
+    if not m:
+        return None
+    prefix, period, hour_raw, minute_raw = m.group(1), m.group(2), m.group(3), m.group(4)
+    hour = _cn_number(hour_raw)
+    if hour is None or not 0 <= hour <= 23:
+        return None
+    # “九点”在晚间语境按 21:00；明确上午/早上不转。
+    evening_context = bool(period in {"下午", "傍晚", "晚上", "晚"}) or bool(
+        not period and re.search(r"今晚|今天晚上|晚上|晚", raw)
+    )
+    if period in {"下午", "傍晚", "晚上", "晚"} and hour < 12:
+        hour += 12
+    elif not period and evening_context and 1 <= hour <= 11:
+        hour += 12
+    elif not period and not evening_context and 1 <= hour <= 11:
+        try:
+            cur = datetime.fromtimestamp(float(now or time.time()), ZoneInfo("Asia/Shanghai"))
+        except Exception:
+            cur = datetime.now(ZoneInfo("Asia/Shanghai"))
+        if cur.hour >= 17:
+            hour += 12
+    minute = 0
+    if minute_raw:
+        if minute_raw == "半":
+            minute = 30
+        elif minute_raw == "一刻":
+            minute = 15
+        elif minute_raw == "三刻":
+            minute = 45
+        else:
+            value = _cn_number(minute_raw)
+            if value is not None:
+                minute = value
+    if not 0 <= minute <= 59:
+        return None
+    try:
+        tz = ZoneInfo("Asia/Shanghai")
+        cur = datetime.fromtimestamp(float(now or time.time()), tz)
+        target = cur.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return target.timestamp()
+    except Exception:
+        return None
+
+
 def normalize_same_evening_start(start, text, now=None):
     """把“今晚八点”被模型误算成明天时拉回今天；明确说明天/明晚时不动。"""
     now=time.time() if now is None else float(now)
+    explicit=parse_explicit_start(text,now)
+    if explicit is not None:
+        return explicit
     raw=str(text or '')
     try:start=float(start)
     except (TypeError,ValueError):return start

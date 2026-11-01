@@ -8,7 +8,7 @@ from nonebot.adapters.onebot.v11 import Bot,GroupMessageEvent,Message,MessageSeg
 from nonebot.params import CommandArg
 from nonebot.matcher import Matcher
 from nonebot.plugin import PluginMetadata
-from src.qq_games import GameStore,game_summary,game_notice,game_help,filter_game_rows,game_forward_nodes,send_game_reminder,short_join_phrase,short_join_waitlist_phrase,short_leave_phrase,parse_waitlist_phrase,parse_trigger_rules,trigger_notification,short_trigger_notification,normalize_same_evening_start
+from src.qq_games import GameStore,game_summary,game_notice,game_help,filter_game_rows,game_forward_nodes,send_game_reminder,short_join_phrase,short_join_waitlist_phrase,short_leave_phrase,parse_waitlist_phrase,parse_trigger_rules,trigger_notification,short_trigger_notification,normalize_same_evening_start,parse_explicit_start
 from src.qq_autonomy import clean,SECRET
 require('nonebot_plugin_apscheduler')
 from nonebot_plugin_apscheduler import scheduler
@@ -54,8 +54,9 @@ async def handle(bot,event,text,explicit=False):
   if r['action']=='clarify':return game_notice(clean(r.get('question') or '你指的是哪一局？',160),'开黑 · 需要确认')
   if r['action']=='list':return await send_game_list(bot,event,rows,r.get('game'))
   sender=event.sender;name=clean(getattr(sender,'card','') or getattr(sender,'nickname','') or str(event.user_id),60)
-  if r.get('action')=='create':
-   r['start']=normalize_same_evening_start(r.get('start'),text)
+  if r.get('action') in {'create','create_new'}:
+   explicit=parse_explicit_start(text)
+   r['start']=explicit if explicit is not None else normalize_same_evening_start(r.get('start'),text)
    if not r.get('trigger_rules'):
     rules=parse_trigger_rules(text)
     if rules:r['trigger_rules']=rules
@@ -120,6 +121,15 @@ async def quick_join_waitlist(bot,event,text):
  try:return store.apply(*key,str(event.user_id),name,str(event.message_id),{'action':'join_waitlist','id':row['id']})
  except ValueError as e:return game_notice(str(e),'开黑 · 未完成')
 
+async def quick_start(bot,event,text):
+ """没有 /开黑 前缀的自然语言约局也走约局解析，不再被普通聊天吞掉。"""
+ if not enabled():return None
+ raw=re.sub(r'@\S+\s*','',str(text or '')).strip()
+ if not raw or raw.startswith(('/','!','！')) or len(raw)>120:return None
+ if not re.search(r'开黑|约局|车队|开一局|来一局|求生之路|l4d2|cs2|go\b',raw,re.I):return None
+ if not re.search(r'今晚|晚上|点|人|车|局|开|候补|旁观|齐',raw):return None
+ return await handle(bot,event,raw,True)
+
 async def quick_join(bot,event,text):
  """群里 @Bot 的短句“我也/我也来”直接报名，不再交给普通聊天模型。"""
  if not enabled() or not short_join_phrase(text):return None
@@ -138,7 +148,7 @@ wait_message=on_message(priority=6,block=False)
 @wait_message.handle()
 async def wait_message_handler(bot:Bot,event:Event,matcher:Matcher):
  if not isinstance(event,GroupMessageEvent) or not enabled():return
- reply=await quick_waitlist(bot,event,event.get_plaintext()) or await quick_join_waitlist(bot,event,event.get_plaintext()) or await quick_leave(bot,event,event.get_plaintext()) or await quick_join(bot,event,event.get_plaintext()) or await quick_list(bot,event,event.get_plaintext())
+ reply=await quick_waitlist(bot,event,event.get_plaintext()) or await quick_join_waitlist(bot,event,event.get_plaintext()) or await quick_leave(bot,event,event.get_plaintext()) or await quick_join(bot,event,event.get_plaintext()) or await quick_start(bot,event,event.get_plaintext()) or await quick_list(bot,event,event.get_plaintext())
  if reply is FORWARDED:
   matcher.stop_propagation();return
  if reply:
@@ -161,10 +171,12 @@ async def execute_plan(bot,event,plan):
  c=plan.get('confidence');e=plan.get('evidence')
  if type(c) not in (int,float) or not math.isfinite(c) or not .94<=c<=1 or not isinstance(e,str) or not e or e not in event.get_plaintext():return None
  if plan.get('action')=='none':return None
- if plan.get('action')=='create':
-  plan={**plan,'start':normalize_same_evening_start(plan.get('start'),event.get_plaintext())}
+ if plan.get('action') in {'create','create_new'}:
+  text=event.get_plaintext()
+  explicit=parse_explicit_start(text)
+  plan={**plan,'start':explicit if explicit is not None else normalize_same_evening_start(plan.get('start'),text)}
   if not plan.get('trigger_rules'):
-   rules=parse_trigger_rules(event.get_plaintext())
+   rules=parse_trigger_rules(text)
    if rules:plan={**plan,'trigger_rules':rules}
  rows=store.rows(str(bot.self_id),str(event.group_id))
  if plan.get('action')=='list':return await send_game_list(bot,event,rows,plan.get('game'))
