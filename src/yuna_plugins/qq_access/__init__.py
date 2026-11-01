@@ -21,7 +21,7 @@ from src.qq_join import blacklist as group_blacklist, is_blacklisted as group_is
 from .friend_watch import FriendWatchStore
 require('nonebot_plugin_apscheduler')
 from nonebot_plugin_apscheduler import scheduler
-__plugin_meta__=PluginMetadata(name='好友与私聊授权',description='超管自然语言审批、三轮体验、私聊每日额度',usage='收到私聊授权通知后直接回复；可说同意加好友并开放每天一万token。')
+__plugin_meta__=PluginMetadata(name='好友与私聊授权',description='好友/加群邀请统一由管理员审批；未同意不自动接受，强制入群先退出；支持三轮体验、私聊额度与邀请回执',usage='收到好友/加群通知后回复处理；加群也可说「同意加群 #编号 / 拒绝加群 #编号」')
 _locks=weakref.WeakValueDictionary();_notify_lock=asyncio.Lock();_retry={};_sent=[]
 ROOT=Path(__file__).resolve().parents[3]
 friend_watch=FriendWatchStore(ROOT/'data/qq/friends.sqlite3')
