@@ -287,7 +287,7 @@ async def greet(bot,qq):
    name=clean(profile.get('nickname',''),30)
   except Exception:pass
   # 固定两段问候；不让模型自由发挥成“哥哥你来啦/一直在等你”。
-  text=f'嗨！{name or "你"}[[SPLIT]]我是Yuna，请问有什么事？'
+  text=f'嗨！{name or "你"}[[SPLIT]]我是清汐，请问有什么事？'
   try:
    for part in text.split('[[SPLIT]]'):
     await bot.send_private_msg(user_id=int(qq),message=MessageSegment.text(part))
