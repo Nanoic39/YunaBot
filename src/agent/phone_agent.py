@@ -329,7 +329,7 @@ class PhoneAgent:
 - install: path（必须在 /YunaGames/Android/apks 下）
 - apps / ui / wait: 观察或等待
 - share_group: group、text；把当前看到的公开内容分享到白名单群，group 必须是管理面板里已加入白名单的群名/群号；不能分享隐私、验证码、支付信息
-- 购物/充值支付：在购物或充值应用内创建订单，选择支付宝；如果当前任务获得了一次性支付测试授权，可以点击“去支付/提交订单/立即支付”进入支付宝确认页，但绝不能输入支付密码，也不能点击“确认付款/立即付款”。到密码输入前必须调用 request_aid，kind=manual，title="支付宝支付待确认"，detail 写清商户、订单号、金额和用途，并额外带 payment=true、amount_minor、merchant、purpose。等待 owner 在手机上手动输入密码完成支付后，再继续核验订单结果。
+- 购物/充值支付：在购物或充值应用内创建订单，选择支付宝；如果当前任务获得了一次性支付测试授权，可以点击“去支付/提交订单/立即支付”进入支付宝确认页。到支付宝密码输入页时必须停下，调用 request_aid，kind=password，title="支付宝支付密码"，detail 写清商户、订单号、金额和用途，并额外带 payment=true、amount_minor、merchant、purpose。owner 会在 QQ 里回复密码，执行器会直接填入密码输入框；owner 回复就是本次操作授权。只有金额不超过 1 元的一次性测试才允许随后点击“确认付款/确认支付”，且只能点一次；不得重复支付、不得修改金额、不得绕过验证。
 - request_aid: kind=sms|phone|password|apk|registration|authorization|publish|tool|manual, title, detail；需要手机号/验证码/文件/人工时使用，执行会暂停直到 owner 回复
 - comment_seen: author, text；仅在任务指定帖子中，将界面上真实可见的评论记入去重队列
 - draft_reply: comment_id, text；创建待超管审核的回复草稿，不直接发送
@@ -605,7 +605,7 @@ class PhoneAgent:
             self._checkpoint(task,'waiting_owner','等待一次性信息或本次授权')
             self.self_memory.update_activity(task['id'],'waiting_aid',ttl=aid_ttl)
             self._save()
-            deadline = time.time() + 600
+            deadline = time.time() + max(600, aid_ttl + 30)
             while time.time() < deadline:
                 if task['cancel'].is_set():
                     raise PhoneTaskError('任务已取消')
@@ -670,7 +670,7 @@ class PhoneAgent:
                     task['status'] = 'running'
                     return {'action': 'request_aid', 'result': 'owner 已提供上述内容；owner 的回答就是执行许可，下一步立即按它继续实际操作，禁止再次 request_aid 同一信息、禁止先停下来询问确认', 'approved':kind in ('publish','registration','authorization','tool') and value=='approve'}
                 await asyncio.sleep(2)
-            raise PhoneTaskStopped('等待协助超过10分钟；已停止操作，验证码或审核需要重新确认')
+            raise PhoneTaskStopped(f'等待协助超过{round(max(600, aid_ttl + 30) / 60)}分钟；已停止操作，验证码或审核需要重新确认')
         if action == 'wait':
             seconds = int(decision.get('seconds') or 2)
             await asyncio.sleep(max(1, min(10, seconds)))
@@ -723,10 +723,18 @@ class PhoneAgent:
                 if field != expected['field'] or node.get('text') != expected['value']:
                     raise PhoneTaskError('手机号输入框被改动，禁止发送短信；请恢复已提供的号码后再继续')
             if re.search(r'支付|付款|下单|确认购买|确认充值', label):
+                handoff = task.get('payment_handoff') or {}
+                try:
+                    amount_ok = int(handoff.get('amount_minor') or 0) <= 100
+                except (TypeError, ValueError):
+                    amount_ok = False
+                allowed_final = (bool(task.get('payment_test_authorized')) and amount_ok
+                                 and bool(task.get('secret_inputs', {}).get('password'))
+                                 and label in {'确认付款', '确认支付', '立即付款'})
                 allowed_open = bool(task.get('payment_test_authorized')) and label in {
                     '去支付', '提交订单', '立即支付', '支付', '去付款'
                 } and not re.search(r'确认|密码|立即付款|确认付款', label)
-                if not allowed_open:
+                if not (allowed_open or allowed_final):
                     task['cancel'].set(); raise PhoneTaskError('真实支付尚未接入，手机动作不能扣款')
             if re.fullmatch(r'(发布|发表|发帖|立即发布|确认发布)', label):
                 if task.get('post_submit_attempted'):

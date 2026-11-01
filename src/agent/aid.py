@@ -17,7 +17,7 @@ KINDS = {
     'password': '密码（一次性输入）', 'registration': '注册与条款确认',
     'authorization': '操作授权', 'publish': '发布内容审核',
 }
-MAX_TTL = 600
+MAX_TTL = 1800
 
 
 class AidError(ValueError):
@@ -67,7 +67,7 @@ class AidStore:
         if not isinstance(context,str) or len(context)>160:raise AidError('请求上下文无效')
         limit=86400 if kind=='manual' and context=='social-setup' else MAX_TTL
         if type(ttl) is not int or not 30 <= ttl <= limit:
-            raise AidError('协助有效期应为30到600秒')
+            raise AidError(f'协助有效期应为30到{limit}秒')
         with self.lock:
             self._expire()
             if len(self.items) >= 3:
