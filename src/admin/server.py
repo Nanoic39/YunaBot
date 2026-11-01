@@ -777,7 +777,7 @@ def create_app(driver, root: Path = ROOT):
     set_phone_agent(phone_agent)
     from src.agent.minecraft import MinecraftAgent, MinecraftClient, set_minecraft_agent
     game_llm=AgentLLM(phone_agent.llm.base,phone_agent.llm.key,phone_agent.llm.model,
-                      system='你是Yuna的Minecraft游戏决策器。只输出JSON对象。当前执行器只有结构化游戏状态，没有截图或UI工具；严格使用提示列出的真实技能，不继承电脑浏览器动作。只根据服务器状态描述已完成的行为。')
+                      system='你是清汐的Minecraft游戏决策器。只输出JSON对象。当前执行器只有结构化游戏状态，没有截图或UI工具；严格使用提示列出的真实技能，不继承电脑浏览器动作。只根据服务器状态描述已完成的行为。')
     minecraft = MinecraftAgent(game_llm, MinecraftClient(
         url=str(getattr(driver.config,'agent_minecraft_url','') or '') or None,
         token=str(getattr(driver.config,'agent_minecraft_token','') or '') or None), root/'data/agent/minecraft.json',
@@ -1931,6 +1931,7 @@ def create_app(driver, root: Path = ROOT):
             job['summary'] = result.get('title') or result.get('error') if result else '读取公开网页'
             job['has_screenshot'] = bool(result and result.get('has_screenshot'))
         return {**runtime, 'policy': data['policy'], 'providers': PROVIDERS,
+                'phone_tasks': phone_agent.list_tasks()[:30],
                 'tasks': [task_summary(t) for t in data['tasks'] if not is_payment(t)],
                 'grants': [g for g in data['grants'] if not is_payment(g)],
                 'capabilities': [c for c in data['capabilities'] if not is_payment({'capability': c['id']})],
@@ -2202,7 +2203,7 @@ def create_app(driver, root: Path = ROOT):
             if body.get('autonomous_intro') is True:
                 authorization={'platform':'xiaoheihe','purpose':'self_introduction','account':str(getattr(driver.config,'xiaoheihe_account','') or os.getenv('XIAOHEIHE_ACCOUNT','') or ''),'max_posts':1,'expires':time.time()+3600}
                 if phone_play.snapshot().get('status')=='idle':
-                    req=phone_play.request('自主检索其他AI介绍风格，撰写并发布本次Yuna自我介绍，不询问超管',45,reason='超管已明确授权本次自主发布',force=True)
+                    req=phone_play.request('自主检索其他AI介绍风格，撰写并发布本次清汐自我介绍，不询问超管',45,reason='超管已明确授权本次自主发布',force=True)
                     created_session=phone_play.approve(req['request']['id'],actor='owner-autonomous-intro')['session']['id']
             from src.agent.autonomy_policy import policy as autonomy
             if autonomy.snapshot()['quiet'] and phone_play.snapshot().get('status')=='idle':
