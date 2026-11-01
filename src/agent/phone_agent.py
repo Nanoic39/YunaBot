@@ -158,7 +158,7 @@ class PhoneAgent:
             raise PhoneTaskError('手机任务不存在')
         return self._public(task)
 
-    async def start(self, goal, max_steps=None, social_post_id=None, social_reply_id=None, social_setup=None, resume_task_id=None):
+    async def start(self, goal, max_steps=None, social_post_id=None, social_reply_id=None, social_setup=None, resume_task_id=None, payment_test=False):
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 2000:
             raise PhoneTaskError('目标无效')
         if self._active:
@@ -190,7 +190,7 @@ class PhoneAgent:
                 'started': time.time(), 'finished': None, 'summary': '', 'error': '',
                 'waiting_for_aid': '', 'steps_limit': steps,
                 'history': [], 'screenshot': b'', 'ui': '', 'cancel': asyncio.Event(),
-                'notified': False, 'future': None}
+                'notified': False, 'future': None, 'payment_test_authorized': bool(payment_test)}
         self.tasks[tid] = task
         self._active = tid
         if self.play is not None:
@@ -329,7 +329,7 @@ class PhoneAgent:
 - install: path（必须在 /YunaGames/Android/apks 下）
 - apps / ui / wait: 观察或等待
 - share_group: group、text；把当前看到的公开内容分享到白名单群，group 必须是管理面板里已加入白名单的群名/群号；不能分享隐私、验证码、支付信息
-- 购物/充值支付：在购物或充值应用内创建订单，选择支付宝，跳转到支付宝确认页后必须停在密码输入前；绝不能输入支付密码，也不能点击最终“确认付款”。调用 request_aid，kind=manual，title="支付宝支付待确认"，detail 写清商户、订单号、金额和用途，并额外带 payment=true、amount_minor、merchant、purpose。等待 owner 在手机上手动输入密码完成支付后，再继续核验订单结果。
+- 购物/充值支付：在购物或充值应用内创建订单，选择支付宝；如果当前任务获得了一次性支付测试授权，可以点击“去支付/提交订单/立即支付”进入支付宝确认页，但绝不能输入支付密码，也不能点击“确认付款/立即付款”。到密码输入前必须调用 request_aid，kind=manual，title="支付宝支付待确认"，detail 写清商户、订单号、金额和用途，并额外带 payment=true、amount_minor、merchant、purpose。等待 owner 在手机上手动输入密码完成支付后，再继续核验订单结果。
 - request_aid: kind=sms|phone|password|apk|registration|authorization|publish|tool|manual, title, detail；需要手机号/验证码/文件/人工时使用，执行会暂停直到 owner 回复
 - comment_seen: author, text；仅在任务指定帖子中，将界面上真实可见的评论记入去重队列
 - draft_reply: comment_id, text；创建待超管审核的回复草稿，不直接发送
@@ -594,7 +594,8 @@ class PhoneAgent:
                 if task.get('secret_inputs', {}).get(kind) == secret_target and (node.get('yuna-filled') == 'true' or (node.get('yuna-filled') is None and node.get('text'))):
                     raise PhoneTaskError('该输入框已按超管答复填写；遮蔽不代表为空，不要重复索取')
             consent_ui = task.get('raw_ui') or task.get('ui', '')
-            aid = aid_store.create(kind, title, detail, ttl=600, context='phone:'+task['id'])
+            aid_ttl = 1800 if task.get('payment_handoff') else 600
+            aid = aid_store.create(kind, title, detail, ttl=aid_ttl, context='phone:'+task['id'])
             task['waiting_aid_title'] = str(title or '')[:120]
             task['waiting_aid_detail'] = str(detail or '')[:300]
             aid_store.attach(aid['id'], task.get('screenshot', b''))
@@ -602,7 +603,7 @@ class PhoneAgent:
             task['waiting_aid_kind']=kind
             task['status'] = 'waiting_aid'
             self._checkpoint(task,'waiting_owner','等待一次性信息或本次授权')
-            self.self_memory.update_activity(task['id'],'waiting_aid',ttl=600)
+            self.self_memory.update_activity(task['id'],'waiting_aid',ttl=aid_ttl)
             self._save()
             deadline = time.time() + 600
             while time.time() < deadline:
@@ -722,7 +723,11 @@ class PhoneAgent:
                 if field != expected['field'] or node.get('text') != expected['value']:
                     raise PhoneTaskError('手机号输入框被改动，禁止发送短信；请恢复已提供的号码后再继续')
             if re.search(r'支付|付款|下单|确认购买|确认充值', label):
-                task['cancel'].set(); raise PhoneTaskError('真实支付尚未接入，手机动作不能扣款')
+                allowed_open = bool(task.get('payment_test_authorized')) and label in {
+                    '去支付', '提交订单', '立即支付', '支付', '去付款'
+                } and not re.search(r'确认|密码|立即付款|确认付款', label)
+                if not allowed_open:
+                    task['cancel'].set(); raise PhoneTaskError('真实支付尚未接入，手机动作不能扣款')
             if re.fullmatch(r'(发布|发表|发帖|立即发布|确认发布)', label):
                 if task.get('post_submit_attempted'):
                     task['cancel'].set();raise PhoneTaskError('已经提交过发帖，不重复点击；请核验发布结果')
