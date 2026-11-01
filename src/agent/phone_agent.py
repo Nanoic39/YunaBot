@@ -146,6 +146,7 @@ class PhoneAgent:
             'waiting_aid_title': str(task.get('waiting_aid_title') or ''),
             'waiting_aid_detail': str(task.get('waiting_aid_detail') or ''),
             'aid_answers': {str(k): str(v)[:500] for k, v in (task.get('aid_answers') or {}).items()},
+            'payment_handoff': dict(task.get('payment_handoff') or {}),
         }
 
     def list_tasks(self):
@@ -328,6 +329,7 @@ class PhoneAgent:
 - install: path（必须在 /YunaGames/Android/apks 下）
 - apps / ui / wait: 观察或等待
 - share_group: group、text；把当前看到的公开内容分享到白名单群，group 必须是管理面板里已加入白名单的群名/群号；不能分享隐私、验证码、支付信息
+- 购物/充值支付：在购物或充值应用内创建订单，选择支付宝，跳转到支付宝确认页后必须停在密码输入前；绝不能输入支付密码，也不能点击最终“确认付款”。调用 request_aid，kind=manual，title="支付宝支付待确认"，detail 写清商户、订单号、金额和用途，并额外带 payment=true、amount_minor、merchant、purpose。等待 owner 在手机上手动输入密码完成支付后，再继续核验订单结果。
 - request_aid: kind=sms|phone|password|apk|registration|authorization|publish|tool|manual, title, detail；需要手机号/验证码/文件/人工时使用，执行会暂停直到 owner 回复
 - comment_seen: author, text；仅在任务指定帖子中，将界面上真实可见的评论记入去重队列
 - draft_reply: comment_id, text；创建待超管审核的回复草稿，不直接发送
@@ -547,6 +549,19 @@ class PhoneAgent:
                 task['password_requested'] = True
             title = str(decision.get('title') or '手机操作需要协助')[:120]
             detail = str(decision.get('detail') or '')[:500]
+            if kind == 'manual' and (decision.get('payment') is True or decision.get('amount_minor') is not None):
+                try:
+                    amount = int(decision.get('amount_minor') or 0)
+                except (TypeError, ValueError):
+                    amount = 0
+                task['payment_handoff'] = {
+                    'merchant': str(decision.get('merchant') or '')[:120],
+                    'purpose': str(decision.get('purpose') or detail)[:300],
+                    'amount_minor': max(0, amount),
+                    'order_id': str(decision.get('order_id') or '')[:160],
+                    'status': 'awaiting_user_password',
+                    'created': time.time(),
+                }
             def _norm_title(text_value):
                 return re.sub(r'[\s①②③④⑤⑥⑦⑧⑨⑩,，。.、:：;；?？!！]', '', str(text_value or ''))
             answered = task.setdefault('aid_answers', {})
