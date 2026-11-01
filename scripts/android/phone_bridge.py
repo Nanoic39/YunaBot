@@ -42,6 +42,10 @@ def ensure_online():
         return True
     if ":" in SERIAL:
         try:
+            # 已连接但变为 offline 时，单纯 adb connect 不会重置传输，必须先断开。
+            if state in ("offline", "unauthorized") or code != 0:
+                subprocess.run([ADB, "disconnect", SERIAL], env=ENV, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=8)
             subprocess.run([ADB, "connect", SERIAL], env=ENV, stdout=subprocess.PIPE,
                            stderr=subprocess.PIPE, timeout=12)
         except Exception:
@@ -152,6 +156,20 @@ class Handler(BaseHTTPRequestHandler):
                 text = body.get("text")
                 if not isinstance(text, str) or not text or len(text) > 2000:
                     raise ValueError("text 无效")
+                if any(ord(ch) > 127 for ch in text):
+                    # ADB shell input text 不支持中文；使用 ADB Keyboard 注入后恢复原输入法。
+                    try:
+                        old_ime = shell("settings", "get", "secure", "default_input_method").decode("utf-8", "ignore").strip()
+                        shell("ime", "set", "com.android.adbkeyboard/.AdbIME")
+                        adb("shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", text)
+                        time.sleep(0.4)
+                        if old_ime and "adbkeyboard" not in old_ime.lower():
+                            shell("ime", "set", old_ime)
+                        out = b""
+                        audit({"action": action, "ok": True, "method": "adbkeyboard"})
+                        return self.send_json(200, {"ok": True, "output": ""})
+                    except Exception:
+                        pass
                 if body.get("replace") is True:
                     shell("uiautomator", "dump", "/sdcard/yuna-input.xml", timeout=60)
                     current = shell("cat", "/sdcard/yuna-input.xml")
@@ -195,6 +213,17 @@ class Handler(BaseHTTPRequestHandler):
                 seconds = intval(body.get("seconds", 2), "seconds", 1, 10)
                 time.sleep(seconds)
                 out = b""
+            elif action == "wechat_notifications":
+                raw = shell("dumpsys", "notification", "--noredact", timeout=30).decode("utf-8", "ignore")
+                rows = []
+                for chunk in re.split(r"\n\s*NotificationRecord\(", raw):
+                    if "com.tencent.mm" not in chunk:
+                        continue
+                    title = re.search(r"android\.title=String \((.*?)\)", chunk)
+                    text = re.search(r"android\.text=String \((.*?)\)", chunk)
+                    if title:
+                        rows.append({"title": title.group(1)[:120], "text": (text.group(1) if text else "")[:500]})
+                return self.send_json(200, {"ok": True, "output": json.dumps(rows, ensure_ascii=False)})
             else:
                 raise ValueError("未知 action")
             audit({"action": action, "ok": True})
