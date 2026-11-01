@@ -777,8 +777,23 @@ def create_app(driver, root: Path = ROOT):
         return loader(goal) if callable(loader) else ''
     phone_agent.chat_memory_loader=agent_memory_loader
     async def _record_payment_handoff(task, handoff):
-        return handoff_store.create(task.get('id') or '', handoff.get('merchant'), handoff.get('order_id'),
-                                    handoff.get('amount_minor'), handoff.get('purpose'))
+        row = handoff_store.create(task.get('id') or '', handoff.get('merchant'), handoff.get('order_id'),
+                                   handoff.get('amount_minor'), handoff.get('purpose'))
+        try:
+            from nonebot import get_bots
+            text = (f"【支付宝支付待确认】\n商户：{row.get('merchant') or '未知'}\n"
+                    f"金额：¥{(int(row.get('amount_minor') or 0) / 100):.2f}\n"
+                    f"用途：{row.get('purpose') or ''}\n"
+                    "请在手机上手动输入支付密码完成；我不会输入密码。完成后回复「支付完成」，或告诉管理员取消。")
+            for bot in get_bots().values():
+                for owner in getattr(driver.config, 'superusers', set()):
+                    try:
+                        await bot.send_private_msg(user_id=int(owner), message=text)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return row
     phone_agent.payment_handoff_callback = _record_payment_handoff
     async def _share_to_whitelist_group(group: str, text: str):
         from src.agent.phone_agent import PhoneTaskError
@@ -2228,7 +2243,8 @@ def create_app(driver, root: Path = ROOT):
                 created_session=phone_play.approve(req['request']['id'],actor='owner-direct-request')['session']['id']
             result = await phone_agent.start(str(body.get('goal') or ''),
                 body.get('max_steps'), social_post_id=body.get('social_post_id'),
-                no_owner_contact=body.get('no_owner_contact',False),publish_authorization=authorization)
+                no_owner_contact=body.get('no_owner_contact',False),publish_authorization=authorization,
+                payment_test=bool(body.get('payment_test')))
         except (PhoneTaskError,PhonePlayError) as error:
             if created_session and (phone_play.snapshot().get('session') or {}).get('id')==created_session:phone_play.end('task_start_failed')
             raise HTTPException(409, str(error)) from error
@@ -2395,6 +2411,7 @@ def create_app(driver, root: Path = ROOT):
 
     @app.get('/api/agent/payment-handoffs', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def payment_handoffs():
+        handoff_store.expire_stale(35)
         return {'items': handoff_store.list(100)}
 
     @app.post('/api/agent/payment-handoffs/{rid}/status', dependencies=[Depends(authenticated), Depends(agent_owner)])

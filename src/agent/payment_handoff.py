@@ -48,6 +48,14 @@ class PaymentHandoffStore:
         with self.db() as d:
             return [dict(r) for r in d.execute('SELECT * FROM handoffs ORDER BY id DESC LIMIT ?', (int(limit),))]
 
+    def expire_stale(self, minutes: int = 35) -> int:
+        cutoff = self.clock() - max(1, int(minutes)) * 60
+        with self.db() as d:
+            cur = d.execute("UPDATE handoffs SET status='expired',note='等待支付密码超时',updated=? "
+                            "WHERE status IN ('awaiting_password','awaiting_user_password') AND created<?",
+                            (self.clock(), cutoff))
+            return int(cur.rowcount or 0)
+
     def status(self, rid, status, note=''):
         with self.db() as d:
             d.execute('UPDATE handoffs SET status=?,note=?,updated=? WHERE id=?',
