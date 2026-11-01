@@ -8,6 +8,7 @@ import QQWorkbench from './pages/QQWorkbench.vue';
 import GameSessions from './pages/GameSessions.vue';
 import RiskReview from './pages/RiskReview.vue';
 import VisionChain from './pages/VisionChain.vue';
+import WechatAdmin from './pages/WechatAdmin.vue';
 import { reconcile } from './pages/resources.js';
 
 const user = ref(null);
@@ -15,7 +16,7 @@ const password = ref('');
 const username = ref('admin');
 const loginBusy = ref(false);
 const loading = ref(false);
-const _allowedTabs = ['overview', 'human', 'world', 'favor', 'ledger', 'slang', 'relations', 'whitelist', 'emotes', 'sessions', 'metrics', 'system', 'ops', 'jobs', 'qq', 'games', 'agent-apps', 'agent-payments', 'risk', 'vision'];
+const _allowedTabs = ['overview', 'human', 'world', 'favor', 'ledger', 'slang', 'relations', 'whitelist', 'emotes', 'sessions', 'metrics', 'system', 'ops', 'jobs', 'qq', 'games', 'agent-apps', 'agent-payments', 'wechat', 'risk', 'vision'];
 const _initialTab = new URLSearchParams(location.search).get('tab') || location.hash.replace('#', '') || localStorage.getItem('yuna_admin_tab') || 'overview';
 const tab = ref(_allowedTabs.includes(_initialTab) ? _initialTab : 'overview');
 const mobileNavOpen = ref(false), navSearchRef=ref(null), mobileButton=ref(null);
@@ -39,7 +40,7 @@ const collapsedGroups=ref(Object.fromEntries(Object.entries(savedGroups).filter(
 const navGroups=[
  {id:'work',label:'工作台',items:[['overview','运行概览','◉'],['metrics','运行指标','▥'],['world','世界地图','◈']]},
  {id:'persona',label:'人格与关系',items:[['human','拟人状态','◐'],['favor','好感度','♡'],['ledger','好感账本','◈'],['slang','玩梗接梗','✧'],['relations','关系与记忆','◍'],['sessions','会话记忆','▤'],['emotes','表情包','☺']]},
- {id:'agent',label:'自主与社交',items:[['qq','QQ群工作台','◎'],['games','开黑管理','⚔'],['agent-apps','APP 使用','▣'],['agent-payments','支付管理','◇']]},
+ {id:'agent',label:'自主与社交',items:[['qq','QQ群工作台','◎'],['games','开黑管理','⚔'],['agent-apps','APP 使用','▣'],['agent-payments','支付管理','◇'],['wechat','微信白名单','✉']]},
  {id:'system',label:'系统管理',items:[['whitelist','白名单','☷'],['risk','风控复核','⚠'],['vision','模型链路','⇄'],['system','插件与系统','⚙'],['jobs','定时任务','◷'],['ops','日志与备份','▤']]},
 ];
 const visibleNavGroups=computed(()=>navGroups.map(g=>({...g,items:g.items.filter(([,label])=>!navQuery.value||g.label.includes(navQuery.value)||label.toLowerCase().includes(navQuery.value.toLowerCase()))})).filter(g=>g.items.length));
@@ -48,7 +49,7 @@ function groupOpen(id){return !!navQuery.value||(appearance.value.layout==='top'
 function toggleGroup(id){if(appearance.value.layout==='top'){topMenu.value=topMenu.value===id?null:id;return;}collapsedGroups.value={...collapsedGroups.value,[id]:!collapsedGroups.value[id]};try{localStorage.setItem('yuna_next_nav_collapsed',JSON.stringify(collapsedGroups.value));}catch{}}
 watch(tab,value=>{const group=navGroups.find(g=>g.items.some(([id])=>id===value));if(group)collapsedGroups.value[group.id]=false;topMenu.value=null;navQuery.value='';},{immediate:true});
 const migrationRef = ref(null);
-const migrationState = ref({jobs:{},qq:{},'agent-apps':{},'agent-payments':{}});
+const migrationState = ref({jobs:{},qq:{},'agent-apps':{},'agent-payments':{},wechat:{}});
 const migrationTitles = {jobs:'任务调度，有序运行。',qq:'把群里的信息，接到实际事情上。','agent-apps':'她在电脑上做了什么。','agent-payments':'额度、授权与支付记录。'};
 const migrationDescriptions = {jobs:'查询、筛选和暂停或恢复定时任务。',qq:'交接简报、群文件资料和群内能力排查。','agent-apps':'节点状态、行为概要和按需查看的详细信息。','agent-payments':'独立的额度管理与支付项目明细。'};
 const _ledgerStatuses = ['pending', 'rejected', 'accepted'];
@@ -1320,7 +1321,8 @@ onMounted(() => {
         <div class="page-breadcrumb"><span>{{activeNavigation.group}}</span><span aria-hidden="true">/</span><strong>{{activeNavigation.label}}</strong></div>
 
         <div class="page-stack">
-        <VisionChain v-if="tab==='vision'" :request="request" :notify="toast" />
+        <WechatAdmin v-if="tab==='wechat'" :request="request" :notify="toast" :user="user" />
+      <VisionChain v-if="tab==='vision'" :request="request" :notify="toast" />
       <RiskReview v-if="tab==='risk'" :request="request" :notify="toast" />
         <QQWorkbench v-if="tab==='qq'" ref="migrationRef" :request="request" :notify="toast" :user="user" :view-state="migrationState.qq" :navigate="setTab" />
         <GameSessions v-if="tab==='games'" :request="request" :notify="toast" />

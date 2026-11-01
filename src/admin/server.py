@@ -35,6 +35,7 @@ from src.agent.phone import PhoneClient, PhoneError
 from src.agent.computer import ComputerClient, ComputerAgent
 from src.agent.phone_agent import PhoneAgent, RealPhoneAgent, PhoneTaskError
 from src.agent.phone_play import PhonePlayError, phone_play
+from src.agent.wechat import wechat_store
 from src.agent.runtime import set_phone_agent
 from src.agent.social import social_store, SocialError
 from src.agent.social_runtime import request_setup as request_social_setup, start_setup as start_social_setup
@@ -2266,6 +2267,51 @@ def create_app(driver, root: Path = ROOT):
             app.add_api_route(legacy_route.path.replace('/api/agent/phone', '/api/agent/computer', 1),
                 legacy_route.endpoint, methods=legacy_route.methods,
                 dependencies=[Depends(authenticated), Depends(agent_owner)])
+
+    @app.get('/api/wechat/contacts', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_contacts():
+        return {'items': wechat_store.list_contacts(), 'source': 'wechat'}
+
+    @app.post('/api/wechat/contacts', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_contact_add(body: dict, request: Request):
+        try:
+            row = wechat_store.contact(str(body.get('nickname') or ''), str(body.get('wxid') or ''),
+                                       bool(body.get('whitelist')))
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        audit(request, '登记微信联系人', row['id6'])
+        return row
+
+    @app.post('/api/wechat/contacts/{id6}/whitelist', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_contact_whitelist(id6: str, body: dict, request: Request):
+        if not wechat_store.set_whitelist(id6, bool(body.get('enabled'))):
+            raise HTTPException(404, '联系人不存在')
+        audit(request, '切换微信白名单', id6)
+        return {'ok': True}
+
+    @app.get('/api/wechat/groups', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_groups():
+        return {'items': wechat_store.list_groups(), 'source': 'wechat'}
+
+    @app.post('/api/wechat/groups', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_group_add(body: dict, request: Request):
+        try:
+            row = wechat_store.group(str(body.get('name') or ''), str(body.get('wxid') or ''),
+                                     bool(body.get('whitelist')))
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+        audit(request, '登记微信群', row['id6'])
+        return row
+
+    @app.post('/api/wechat/groups/{id6}/whitelist', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_group_whitelist(id6: str, body: dict, request: Request):
+        with wechat_store.db() as d:
+            changed = d.execute('UPDATE groups SET whitelist=?, updated=? WHERE id6=?',
+                                (1 if body.get('enabled') else 0, __import__('time').time(), id6)).rowcount == 1
+        if not changed:
+            raise HTTPException(404, '群不存在')
+        audit(request, '切换微信群白名单', id6)
+        return {'ok': True}
 
     @app.get('/api/agent/payments', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def agent_payments():
