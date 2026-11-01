@@ -213,6 +213,29 @@ class Handler(BaseHTTPRequestHandler):
                 seconds = intval(body.get("seconds", 2), "seconds", 1, 10)
                 time.sleep(seconds)
                 out = b""
+            elif action == "wechat_ocr":
+                raw = adb("exec-out", "screencap", "-p", timeout=60)
+                ocr_file = "/tmp/yuna-wechat-ocr.png"
+                with open(ocr_file, "wb") as fh:
+                    fh.write(raw)
+                proc = subprocess.run(["tesseract", ocr_file, "stdout", "-l", "chi_sim+eng",
+                                       "--psm", "11", "tsv"], stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, timeout=30)
+                rows = []
+                for line in proc.stdout.decode("utf-8", "ignore").splitlines()[1:]:
+                    parts = line.split("\t")
+                    if len(parts) < 12 or not parts[11].strip():
+                        continue
+                    try:
+                        left, top, width, height = (int(parts[6]), int(parts[7]),
+                                                    int(parts[8]), int(parts[9]))
+                    except ValueError:
+                        continue
+                    if width <= 0 or height <= 0:
+                        continue
+                    rows.append({"text": parts[11][:200], "x": left, "y": top,
+                                 "w": width, "h": height})
+                return self.send_json(200, {"ok": True, "output": json.dumps(rows, ensure_ascii=False)})
             elif action == "wechat_notifications":
                 raw = shell("dumpsys", "notification", "--noredact", timeout=30).decode("utf-8", "ignore")
                 rows = []
