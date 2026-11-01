@@ -73,6 +73,30 @@ class WeChatPhone:
             return []
         return [r for r in rows if isinstance(r, dict) and r.get('text')]
 
+    async def _verify_sent(self, message: str) -> bool:
+        rows = await self._ocr()
+        probe = message.replace(' ', '')[:6]
+        for row in rows:
+            text = str(row.get('text') or '').replace(' ', '')
+            y = int(row.get('y') or 0)
+            if probe and probe in text and 1400 < y < 2350:
+                return True
+        return False
+
+    async def _open_existing_chat(self, contact: str) -> bool:
+        rows = await self._ocr()
+        probe = contact.split('|')[0].strip()[:4]
+        if not probe:
+            return False
+        candidates = [r for r in rows if 250 < int(r.get('y') or 0) < 2300 and probe.lower() in str(r.get('text') or '').lower()]
+        if not candidates:
+            return False
+        target = min(candidates, key=lambda r: int(r.get('y') or 0))
+        await self.phone.action({'action': 'tap', 'x': int(target['x']) + int(target['w']) // 2,
+                                 'y': int(target['y']) + int(target['h']) // 2})
+        await asyncio.sleep(0.8)
+        return True
+
     async def send(self, contact: str, message: str) -> bool:
         contact = str(contact or '').strip()
         message = str(message or '').strip()
@@ -88,6 +112,27 @@ class WeChatPhone:
                 await asyncio.sleep(0.2)
         await self.phone.action({'action': 'launch', 'package': 'com.tencent.mm'})
         await asyncio.sleep(1.0)
+        # 已存在的会话优先从聊天列表进入，避免搜索页跳到“选择联系人”。
+        if await self._open_existing_chat(contact):
+            await asyncio.sleep(0.5)
+            await self.phone.action({'action': 'tap', 'x': 500, 'y': 2580})
+            await asyncio.sleep(0.3)
+            await self._type(message)
+            await asyncio.sleep(0.5)
+            rows = await self._ocr()
+            send = next((r for r in rows if '发送' in str(r.get('text') or '')), None)
+            if send:
+                x = int(send['x']) + int(send['w']) // 2
+                y = int(send['y']) + int(send['h']) // 2
+            else:
+                text_row = next((r for r in rows if message[:2] in str(r.get('text') or '')), None)
+                y = 1640 if text_row and int(text_row.get('y') or 0) < 2000 else 2580
+                x = 1105
+            await self.phone.action({'action': 'tap', 'x': x, 'y': y})
+            await asyncio.sleep(0.7)
+            if not await self._verify_sent(message):
+                raise PhoneError('微信发送未在聊天区出现')
+            return True
         # 微信搜索页不暴露可读文本，使用固定入口 + 搜索结果首行。
         await self.phone.action({'action': 'tap', 'x': 1000, 'y': 225})
         await asyncio.sleep(0.5)
@@ -126,4 +171,6 @@ class WeChatPhone:
             point = (1105, 2580)
         await self.phone.action({'action': 'tap', 'x': point[0], 'y': point[1]})
         await asyncio.sleep(1.0)
+        if not await self._verify_sent(message):
+            raise PhoneError('微信发送未在聊天区出现')
         return True
