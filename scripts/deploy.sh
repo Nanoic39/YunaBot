@@ -85,6 +85,10 @@ sync_code() {
   # 聊天插件：只覆盖 .py，保留 character.txt / json / memory / emotes / personas
   ( cd "$ROOT/src/yuna_plugins/chat" && tar -czf - --exclude='__pycache__' *.py character_reference.png ) \
     | remote "set -e; cd '$REMOTE_DIR/src/yuna_plugins/chat'; tar -xzf -"
+
+  # 菜单插件：只覆盖代码，保留运行时 menu.json（人工/自动生成的条目）
+  ( cd "$ROOT/src/yuna_plugins/menu" && tar -czf - --exclude='__pycache__' *.py ) \
+    | remote "set -e; mkdir -p '$REMOTE_DIR/src/yuna_plugins/menu'; cd '$REMOTE_DIR/src/yuna_plugins/menu'; tar -xzf -"
 }
 
 check_remote() {

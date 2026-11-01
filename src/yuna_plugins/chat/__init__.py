@@ -106,8 +106,8 @@ from .social import (
 
 __plugin_meta__ = PluginMetadata(
     name="chat",
-    description="AI 聊天插件：白名单内按活跃度与话题相关度选择性发言，带跨群/用户记忆",
-    usage="@Bot或提及即可触发，日常热烈讨论时随机插话",
+    description="AI 聊天插件：群聊/私聊对话、长期记忆、语义玩梗接梗、联网检索、识图、可见群事件、自然语言生图与Q版表情包",
+    usage="@Bot 或提及触发对话；可直接用自然语言要求画图、找表情包、查询记忆/好感度；日常活跃时会按语境适度插话",
 )
 
 chat_config = get_plugin_config(Config)

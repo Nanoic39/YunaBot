@@ -17,7 +17,7 @@ from .config import Config
 __plugin_meta__ = PluginMetadata(
     name="功能菜单",
     description="列出 bot 已加载的功能插件并渲染为图片",
-    usage="发送 !menu / ！menu / /menu 查看；超管可用 !menurefresh 强制刷新",
+    usage="发送 !menu / ！menu / /menu 查看；超管发送 ！menu refresh 或 !menurefresh 刷新",
     config=Config,
     supported_adapters=None,
 )
@@ -185,8 +185,8 @@ def _load_menu_config() -> dict:
         return {}
 
 
-def _auto_write_menu_config() -> bool:
-    """启动时按已加载插件补齐 menu.json 缺失字段，保留已有字段与覆盖。"""
+def _auto_write_menu_config(force: bool = False) -> bool:
+    """启动时补齐 menu.json 缺失字段；force=True 时刷新自动条目以适配新功能。"""
     cfg = _load_menu_config()
     plugins = cfg.get("plugins", {})
     if not isinstance(plugins, dict):
@@ -218,24 +218,31 @@ def _auto_write_menu_config() -> bool:
         else:
             trigger = "event"
 
+        manual = bool(entry.get("manual"))
         if "name" not in entry:
             entry["name"] = meta.name or pid
             changed = True
-        if "description" not in entry:
-            entry["description"] = meta.description or ""
-            changed = True
-        if "usage" not in entry:
-            entry["usage"] = meta.usage or ""
-            changed = True
+        if "description" not in entry or (force and not manual):
+            value = meta.description or ""
+            if entry.get("description") != value:
+                entry["description"] = value
+                changed = True
+        if "usage" not in entry or (force and not manual):
+            value = meta.usage or ""
+            if entry.get("usage") != value:
+                entry["usage"] = value
+                changed = True
         if "show" not in entry:
             entry["show"] = True
             changed = True
-        if "type" not in entry:
-            entry["type"] = trigger
-            changed = True
-        if "commands" not in entry:
-            entry["commands"] = d_cmds
-            changed = True
+        if "type" not in entry or (force and not manual):
+            if entry.get("type") != trigger:
+                entry["type"] = trigger
+                changed = True
+        if "commands" not in entry or (force and not manual and not entry.get("commands_manual")):
+            if entry.get("commands") != d_cmds:
+                entry["commands"] = d_cmds
+                changed = True
 
     if not changed:
         return False
@@ -538,8 +545,8 @@ def _ensure_menu() -> str | None:
 @driver.on_startup
 async def _warm_menu():
     try:
-        if _auto_write_menu_config():
-            logger.info("【菜单】已补齐 menu.json 缺失字段")
+        if _auto_write_menu_config(force=True):
+            logger.info("【菜单】已按当前插件功能刷新 menu.json")
         if _build_menu():
             logger.info(f"【菜单】已生成 {_menu_cache.get('count', 0)} 项功能菜单")
     except Exception as e:
@@ -549,8 +556,8 @@ async def _warm_menu():
 def _is_menu_command(event) -> bool:
     if not isinstance(event, (GroupMessageEvent, PrivateMessageEvent)):
         return False
-    text = event.get_message().extract_plain_text().strip().lower()
-    return text in {"!menu", "！menu", "/menu"}
+    text = event.get_message().extract_plain_text().strip().lower().replace("！", "!")
+    return text in {"!menu", "/menu"}
 
 
 menu_matcher = on_message(rule=Rule(_is_menu_command), priority=10, block=True)
@@ -573,8 +580,9 @@ async def _handle_menu():
 def _is_refresh_command(event) -> bool:
     if not isinstance(event, (GroupMessageEvent, PrivateMessageEvent)):
         return False
-    text = event.get_message().extract_plain_text().strip().lower()
-    return text in {"!menurefresh", "！menurefresh", "/menurefresh"}
+    text = event.get_message().extract_plain_text().strip().lower().replace("！", "!")
+    text = " ".join(text.split())
+    return text in {"!menurefresh", "/menurefresh", "!menu refresh", "/menu refresh", "!menu 刷新", "/menu 刷新"}
 
 
 menu_refresh_matcher = on_message(
@@ -585,7 +593,7 @@ menu_refresh_matcher = on_message(
 @menu_refresh_matcher.handle()
 async def _handle_menu_refresh():
     try:
-        synced = _auto_write_menu_config()
+        synced = _auto_write_menu_config(force=True)
         _menu_cache.clear()
         b64 = _build_menu()
     except Exception as e:
@@ -593,7 +601,7 @@ async def _handle_menu_refresh():
         await menu_refresh_matcher.finish("菜单刷新失败，请稍后重试。")
     if not b64:
         await menu_refresh_matcher.finish("暂无可显示的插件。")
-    note = "（已补齐 menu.json 缺失字段）" if synced else ""
+    note = "（已按当前功能刷新菜单配置）" if synced else ""
     logger.info(f"【菜单】超管强制刷新，共 {_menu_cache.get('count', 0)} 项")
     await menu_refresh_matcher.finish(
         MessageSegment.image(f"base64://{b64}") + f"\n菜单已强制刷新{note}"

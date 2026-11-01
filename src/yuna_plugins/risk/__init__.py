@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
 import os
 import random
 import re
@@ -12,16 +13,25 @@ import sqlite3
 import time
 from pathlib import Path
 
-from nonebot import get_driver, on_message
-from nonebot.adapters.onebot.v11 import Bot, MessageEvent, MessageSegment, PrivateMessageEvent, GroupMessageEvent
+from nonebot import get_driver, on_message, on_notice
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    FriendRecallNoticeEvent,
+    GroupMessageEvent,
+    GroupRecallNoticeEvent,
+    Message,
+    MessageEvent,
+    MessageSegment,
+    PrivateMessageEvent,
+)
 from nonebot.matcher import Matcher
 from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
 
 __plugin_meta__ = PluginMetadata(
     name="消息风控",
-    description="检测辱骂、色情、政治敏感、绕过限制、记忆/关系覆盖，并推送超管处理",
-    usage="超管私聊：风控列表；直接回复风控通知：警告/禁言 10/退群/忽略；风控清空",
+    description="检测文本、图片和表情中的辱骂、色情、政治敏感、绕过限制、记忆/关系覆盖及虐待动物内容；生成可引用原文的详细警告并推送超管",
+    usage="超管私聊：风控列表/详情；回复风控通知：警告[私信]、禁言 10、退群、忽略；支持文本/图片/表情的辱骂、色情、政治、越狱、记忆覆盖、虐待动物检测",
 )
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -34,6 +44,7 @@ LABELS = {
     "political": "政治敏感",
     "bypass": "绕过限制/提示词攻击",
     "memory": "覆盖记忆/关系/人格",
+    "animal_abuse": "虐待动物",
 }
 
 # 有指向性的风险（辱骂、绕过限制、改写记忆）必须区分“骂/要求的是谁”。
@@ -219,12 +230,19 @@ _MEMORY = re.compile(
     r"我们(结婚|在一起|是情侣)|强制.{0,6}(好感|关系|亲密))", re.I
 )
 
+_ANIMAL_ABUSE = re.compile(
+    r"(虐待(?:动物|猫|狗|宠物|小动物)?|虐杀|虐猫|虐狗|虐畜|"
+    r"(?:打|踢|踩|踹|砸|摔|烧|烫|砍|割|挖|扎|毒|勒)(?:死|伤|瞎|残)?(?:猫|狗|动物|宠物)|"
+    r"活埋|活剥|活烧|活体投喂|扒皮|断腿|打断腿|挖眼|割耳|"
+    r"动物.{0,8}(?:惨叫|抽搐|痛苦|流血|奄奄一息))", re.I
+)
 _RULES = [
     ("abuse", _ABUSE, "high"),
     ("sexual", _SEXUAL, "high"),
     ("political", _POLITICAL, "high"),
     ("bypass", _BYPASS, "high"),
     ("memory", _MEMORY, "medium"),
+    ("animal_abuse", _ANIMAL_ABUSE, "high"),
 ]
 
 # 谐音/近音/错字/拆字/Leet 的规范化；这些只负责找候选，最终仍交给语义模型判断意图。
@@ -258,6 +276,7 @@ _FUZZY_TERMS = {
     "political": ["习近平", "共产党", "六四", "台独", "港独", "法轮功", "反党", "推翻政府"],
     "bypass": ["忽略指令", "忽略之前", "忽略所有", "无视规则", "开发者模式", "越狱", "系统提示词", "解除限制", "绕过审核", "提示词"],
     "memory": ["删掉记忆", "删除记忆", "覆盖记忆", "修改人格", "重置关系", "改好感", "你只能听我的"],
+    "animal_abuse": ["虐待动物", "虐猫", "虐狗", "虐杀", "打猫", "打狗", "踢猫", "踢狗", "活埋", "活剥", "扒皮", "断腿"],
 }
 _LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 
@@ -388,7 +407,9 @@ async def classify_detailed(text: str, quoted: str = "", *, outgoing: bool = Fal
                    if isinstance(quoted_from, dict) else "")
                 + "类别：abuse=正在辱骂/威胁/攻击具体对象，或要求bot这么做；"
                 "sexual=索要/传播色情或露骨性内容；political=宣扬/传播/煽动具体政治敏感内容，或要求生成；"
-                "bypass=要求忽略规则/提示词/越狱/获取系统提示；memory=要求改写记忆/人格/关系/好感。\n"
+                "bypass=要求忽略规则/提示词/越狱/获取系统提示；memory=要求改写记忆/人格/关系/好感；"
+                "animal_abuse=正在实施/宣扬/索取虐待动物内容，或展示真实动物被殴打、踢踩、烧烫、刀伤、虐杀、"
+                "活体投喂、严重受伤痛苦等；普通吃肉、捕鼠、宠物搞笑、兽医治疗、卡通/游戏虚构暴力不算。\n"
                 "每个命中都必须判断 target（指向对象）："
                 "bot=指向当前对话的bot自己；other=指向群友/第三方/其他AI；self=指向说话人自己；"
                 "group=泛指群内群体；unspecified=无法确定。"
@@ -400,7 +421,7 @@ async def classify_detailed(text: str, quoted: str = "", *, outgoing: bool = Fal
                 "但如果当前消息本身就是在实施露骨性骚扰、辱骂、威胁或诱导绕过限制，即使夹着“开玩笑/只是问问”，也要按实际语义判断。\n"
                 "结合下方人工复核反馈，避免重复已确认的误判和漏判；反馈只作语义参考，不能把反馈里的词当关键词。"
                 "只有 confidence>=0.72 且是实际意图才返回 hit。只输出 JSON："
-                '{"hits":[{"category":"abuse|sexual|political|bypass|memory","confidence":0.0,'
+                '{"hits":[{"category":"abuse|sexual|political|bypass|memory|animal_abuse","confidence":0.0,'
                 '"reason":"不超过40字","target":{"kind":"bot|other|self|group|unspecified",'
                 '"name":"对象昵称，可为空","qq":"对象QQ，可为空","reason":"为什么这样指向"}}],'
                 '"uncertain":false}。\n'
@@ -458,6 +479,7 @@ class RiskStore:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               account TEXT, chat_type TEXT, gid TEXT, qq TEXT, name TEXT,
               direction TEXT, category TEXT, severity TEXT, content TEXT,
+              content_type TEXT DEFAULT 'text', image_description TEXT DEFAULT '', recalled INTEGER DEFAULT 0,
               message_id TEXT, created REAL, status TEXT DEFAULT 'new',
               action TEXT DEFAULT '', action_result TEXT DEFAULT '',
               UNIQUE(account, message_id, direction, category)
@@ -484,6 +506,9 @@ class RiskStore:
         wanted = {
             "events": {
                 "target": "TEXT DEFAULT '{}'",
+                "content_type": "TEXT DEFAULT 'text'",
+                "image_description": "TEXT DEFAULT ''",
+                "recalled": "INTEGER DEFAULT 0",
             },
             "reviews": {
                 "target": "TEXT DEFAULT '{}'",
@@ -502,13 +527,15 @@ class RiskStore:
         return conn
 
     def add(self, account, chat_type, gid, qq, name, direction, category, severity, content, message_id,
-            target=None):
+            target=None, content_type="text", image_description=""):
         with self.db() as d:
             cur = d.execute(
-                "INSERT OR IGNORE INTO events(account,chat_type,gid,qq,name,direction,category,severity,content,message_id,target,created) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO events(account,chat_type,gid,qq,name,direction,category,severity,content,"
+                "content_type,image_description,message_id,target,created) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (str(account), chat_type, str(gid or ""), str(qq), str(name)[:80], direction,
-                 category, severity, str(content)[:1000], str(message_id),
+                 category, severity, str(content)[:1000], str(content_type or "text")[:20],
+                 str(image_description or "")[:1200], str(message_id),
                  json.dumps(target or {}, ensure_ascii=False), time.time()),
             )
             if cur.rowcount:
@@ -623,6 +650,14 @@ class RiskStore:
             ).fetchone()
             return bool(row)
 
+    def mark_recalled(self, account: str, message_id: str) -> int:
+        with self.db() as d:
+            cur = d.execute(
+                "UPDATE events SET recalled=1 WHERE account=? AND message_id LIKE ?",
+                (str(account), f"{str(message_id)}:%"),
+            )
+            return int(cur.rowcount or 0)
+
     def update(self, rid: int, status: str, action: str, result: str = ""):
         with self.db() as d:
             d.execute("UPDATE events SET status=?,action=?,action_result=? WHERE id=?", (status, action, result[:500], rid))
@@ -691,6 +726,7 @@ def _event_text(row: dict) -> str:
         f"用户：{row.get('name') or ''}（QQ {row.get('qq')}）",
         f"类型：{LABELS.get(row.get('category'), row.get('category'))}　等级：{row.get('severity')}",
         f"指向：{target}",
+        f"原文类型：{row.get('content_type') or 'text'}",
         f"内容：{str(row.get('content') or '').replace(chr(10), ' ')[:500]}",
         "处理：直接回复本条消息：警告 [群内|私信] / 禁言 10 / 退群 / 忽略",
     ])
@@ -774,6 +810,87 @@ def _review_context(event: MessageEvent, text: str, direction: str) -> list[dict
         return []
 
 
+_IMAGE_RISK_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _message_content_type(message) -> str:
+    try:
+        for seg in message:
+            if getattr(seg, "type", "") == "image":
+                data = getattr(seg, "data", {}) or {}
+                if str(data.get("sub_type") or "") == "1":
+                    return "sticker"
+                return "image"
+    except Exception:
+        pass
+    return "text"
+
+
+async def _image_risk_info(bot: Bot, event: MessageEvent) -> list[dict]:
+    """检查群图片/表情是否包含真实动物虐待；同时保留一段图片描述供警告引用。"""
+    try:
+        from src.yuna_plugins.chat import (
+            _extract_image_urls, _image_url_to_data_url, _resolve_image_refs, _vision_client,
+        )
+        message = event.get_message()
+        urls = _extract_image_urls(message)
+        if not urls:
+            return []
+        urls = await _resolve_image_refs(bot, urls)
+        gid = str(getattr(event, "group_id", "") or "")
+        llm, vision = _vision_client(gid, "image")
+        if not llm or not getattr(llm, "available", False):
+            return []
+        out = []
+        for url in urls[:4]:
+            data_url = await _image_url_to_data_url(url)
+            if not data_url:
+                continue
+            key = hashlib.sha1(data_url.encode("utf-8", "ignore")).hexdigest()
+            cached = _IMAGE_RISK_CACHE.get(key)
+            if cached and time.time() - cached[0] < 3600:
+                out.append(cached[1])
+                continue
+            prompt = (
+                "你在做图片风控检测。判断图片里是否出现真实动物被虐待/伤害/虐杀，"
+                "包括殴打、踢踩、烧烫、刀伤、活埋、活体投喂、严重受伤或明显痛苦。"
+                "普通宠物日常、吃肉、捕鼠、兽医治疗、卡通/游戏/动画里的虚构暴力都不算。"
+                "只输出 JSON：{\"animal_abuse\":true/false,\"confidence\":0.0,"
+                "\"description\":\"用一句中文客观描述画面主体、动物状态和是否有受伤/暴力\"}。"
+                "不要输出思考过程，不要解释规则。"
+            )
+            try:
+                raw = await asyncio.wait_for(
+                    llm.chat(
+                        [{"role": "system", "content": prompt},
+                         {"role": "user", "content": [
+                             {"type": "text", "text": "检查这张图片，只输出 JSON。"},
+                             {"type": "image_url", "image_url": {"url": data_url, "detail": "auto"}},
+                         ]}],
+                        temperature=0.0, max_tokens=320, disable_thinking=True, json_mode=True,
+                    ), timeout=30,
+                )
+                raw = re.sub(r"^```(?:json)?|```$", "", str(raw or "").strip(), flags=re.I).strip()
+                obj = json.loads(raw)
+                info = {
+                    "animal_abuse": bool(obj.get("animal_abuse")),
+                    "confidence": float(obj.get("confidence") or 0),
+                    "description": str(obj.get("description") or "")[:500],
+                }
+            except Exception as error:
+                logger.debug(f"[risk] 图片动物虐待检测失败：{type(error).__name__}")
+                continue
+            _IMAGE_RISK_CACHE[key] = (time.time(), info)
+            if len(_IMAGE_RISK_CACHE) > 300:
+                for old in sorted(_IMAGE_RISK_CACHE, key=lambda k: _IMAGE_RISK_CACHE[k][0])[:50]:
+                    _IMAGE_RISK_CACHE.pop(old, None)
+            out.append(info)
+        return out
+    except Exception as error:
+        logger.debug(f"[risk] 图片风险检测异常：{type(error).__name__}")
+        return []
+
+
 def _record_review(account: str, event: MessageEvent, text: str, quoted: str, detail: dict, made: list[dict], direction: str):
     hits = detail.get("hits") or []
     kind = "detected" if hits else ("uncertain" if detail.get("uncertain") else "sample")
@@ -805,20 +922,46 @@ def _record_review(account: str, event: MessageEvent, text: str, quoted: str, de
 
 
 async def record_and_notify(bot: Bot, event: MessageEvent, text: str, direction: str = "in", quoted: str = "",
-                            quoted_from=None) -> list[dict]:
+                            quoted_from=None, image_info: list[dict] | None = None) -> list[dict]:
     account = str(getattr(bot, "self_id", ""))
     chat_type, gid = _chat_meta(event)
     qq = str(getattr(event, "user_id", ""))
     name = _name(event)
     message_id = f"{event.message_id}:{direction}"
     made = []
+    image_info = image_info or []
+    content_type = _message_content_type(event.get_message())
+    image_description = "\n".join(
+        f"图{i + 1}：{str(info.get('description') or '未能读取画面描述')[:500]}"
+        for i, info in enumerate(image_info)
+    )[:1800]
     content = str(text)
+    if not content.strip() and image_info:
+        content = "[表情]" if content_type == "sticker" else "[图片]"
+    if image_description:
+        content = (content + "\n【图片描述】" + image_description)[:1800]
     if quoted:
         content = (content + "\n【引用】" + str(quoted))[:1800]
     self_id = str(getattr(bot, "self_id", "") or getattr(event, "self_id", ""))
     bot_name = _bot_name()
     detail = await classify_detailed(text, quoted, outgoing=direction == "out", bot_name=bot_name,
                                      self_id=self_id, speaker_name=name, speaker_qq=qq, quoted_from=quoted_from)
+    for index, info in enumerate(image_info):
+        try:
+            confidence = float(info.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0
+        if info.get("animal_abuse") and confidence >= 0.72:
+            desc = str(info.get("description") or "")[:500]
+            detail.setdefault("hits", []).append({
+                "category": "animal_abuse",
+                "label": LABELS["animal_abuse"],
+                "severity": "high",
+                "match": desc[:80],
+                "target": {"kind": "unspecified", "name": "", "qq": "", "reason": "图片中的动物"},
+                "confidence": confidence,
+            })
+            detail["confidence"] = max(float(detail.get("confidence") or 0), confidence)
     # 少量无候选的正常消息也做纯语义抽查，专门发现谐音/衍生意导致的漏判。
     if not detail.get("candidates") and random.random() < _semantic_audit_rate():
         audited = await classify_detailed(text, quoted, outgoing=direction == "out", force_semantic=True,
@@ -828,7 +971,8 @@ async def record_and_notify(bot: Bot, event: MessageEvent, text: str, direction:
             detail = audited
     for hit in detail.get("hits") or []:
         rid = store.add(account, chat_type, gid, qq, name, direction, hit["category"], hit["severity"],
-                        content, message_id, target=hit.get("target"))
+                        content, message_id, target=hit.get("target"),
+                        content_type=content_type, image_description=image_description)
         if rid:
             row = store.get(rid)
             if row:
@@ -941,6 +1085,63 @@ def _parse_reply_action(text: str):
     return action, m.group(2).split()
 
 
+def _mask_warning_sensitive(text: str) -> str:
+    value = str(text or "")
+    for _category, pattern, _severity in _RULES:
+        value = pattern.sub("***", value)
+    return value
+
+
+def _warning_body(row: dict) -> str:
+    ctype = str(row.get("content_type") or "text")
+    raw = str(row.get("content") or "").replace("\r", "").strip()
+    desc = str(row.get("image_description") or "").strip()
+    recalled = bool(row.get("recalled"))
+    if ctype in ("image", "sticker"):
+        kind = "表情" if ctype == "sticker" else "图片"
+        text_part = raw.split("\n【图片描述】", 1)[0].strip()
+        lines = [f"原消息类型：{kind}"]
+        if text_part and text_part not in ("[图片]", "[表情]"):
+            lines.append("原消息附言：" + text_part[:300])
+        lines.append("图片描述：" + (desc[:700] if desc else "未能读取图片描述（仍已记录原始图片）"))
+        if recalled:
+            lines.append("原消息已撤回；以上为撤回前保存的内容描述。")
+        return "\n".join(lines)
+    excerpt = raw.split("\n【引用】", 1)[0].strip()
+    if recalled:
+        excerpt = _mask_warning_sensitive(excerpt)
+        return "原消息（已撤回，敏感词已打码）：" + (excerpt[:600] or "（原文为空）")
+    return "原文：" + (excerpt[:600] or "（原文为空）")
+
+
+def _warning_message(row: dict) -> str:
+    category = LABELS.get(row.get("category"), row.get("category") or "高风险内容")
+    target = _target_text(row.get("target"), short=True)
+    reason = str(row.get("action_result") or "").strip()
+    head = (
+        "【风控警告】\n"
+        f"用户 {row.get('name') or row.get('qq')} 的消息触发了「{category}」风控。\n"
+        f"指向对象：{target}\n"
+    )
+    body = _warning_body(row)
+    tail = (
+        "\n处理要求：请立即停止发布同类内容；继续发布将按群规处理。\n"
+        "请群内所有成员引以为戒，不要发布、传播或索要类似内容。"
+        if row.get("chat_type") == "group"
+        else "\n处理要求：请立即停止发布同类内容，否则将按规则处理。"
+    )
+    return head + body + tail
+
+
+def _warning_reply_id(row: dict) -> int | None:
+    raw = str(row.get("message_id") or "").split(":", 1)[0]
+    try:
+        value = int(raw)
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def _apply_owner_action(bot: Bot, event: PrivateMessageEvent, row: dict, action: str, rest: list[str]) -> bool:
     """执行编号命令和“回复通知命令”共用的处理逻辑；确认消息不再带事件编号。"""
     rid = row["id"]
@@ -954,10 +1155,18 @@ async def _apply_owner_action(bot: Bot, event: PrivateMessageEvent, row: dict, a
         return True
     if action == "警告":
         mode = "私信" if "私信" in rest else "群内"
-        warning = "警告：你的消息包含不当内容，请停止。"
+        warning = _warning_message(row)
         try:
             if mode == "群内" and row.get("gid"):
-                await bot.send_group_msg(group_id=int(row["gid"]), message=MessageSegment.at(int(row["qq"])) + MessageSegment.text(" " + warning))
+                segments = []
+                reply_id = _warning_reply_id(row) if not row.get("recalled") else None
+                if reply_id:
+                    segments.append(MessageSegment.reply(reply_id))
+                if str(row.get("qq") or "").isdigit():
+                    segments.append(MessageSegment.at(str(row["qq"])))
+                    segments.append(MessageSegment.text(" "))
+                segments.append(MessageSegment.text(warning))
+                await bot.send_group_msg(group_id=int(row["gid"]), message=Message(segments) if len(segments) > 1 else segments[0])
             else:
                 await bot.send_private_msg(user_id=int(row["qq"]), message=MessageSegment.text(warning))
             store.update(rid, "handled", "warn", mode)
@@ -1084,8 +1293,25 @@ async def _risk_gate(bot: Bot, event: MessageEvent, matcher: Matcher):
             matcher.stop_propagation()
             await matcher.finish()
             return
-    if not text:
+    image_info = await _image_risk_info(bot, event)
+    if not text and not image_info:
         return
-    made = await record_and_notify(bot, event, text, "in", quoted_text, quoted_from=quoted_from)
+    made = await record_and_notify(bot, event, text, "in", quoted_text, quoted_from=quoted_from,
+                                   image_info=image_info)
     if made:
         logger.warning(f"[risk] 检测到 {len(made)} 条风控事件 qq={event.user_id} gid={getattr(event, 'group_id', '')}")
+
+
+recall_matcher = on_notice(priority=0, block=False)
+
+
+@recall_matcher.handle()
+async def _risk_recall_handler(bot: Bot, event, matcher: Matcher):
+    if not isinstance(event, (GroupRecallNoticeEvent, FriendRecallNoticeEvent)):
+        return
+    try:
+        changed = store.mark_recalled(str(bot.self_id), str(event.message_id))
+        if changed:
+            logger.info(f"[risk] 原消息已撤回，更新 {changed} 条风控记录：{event.message_id}")
+    except Exception as error:
+        logger.debug(f"[risk] 更新撤回状态失败：{type(error).__name__}")

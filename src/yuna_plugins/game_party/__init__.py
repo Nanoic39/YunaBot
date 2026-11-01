@@ -12,7 +12,7 @@ from src.qq_games import GameStore,game_summary,game_notice,game_help,filter_gam
 from src.qq_autonomy import clean,SECRET
 require('nonebot_plugin_apscheduler')
 from nonebot_plugin_apscheduler import scheduler
-__plugin_meta__=PluginMetadata(name='约游戏开黑',description='本群自然语言约局、报名、退出、取消和一次提醒',usage='/开黑 今晚八点MC四个人；回复约局消息或@Yuna说我也来/退出/取消；/开黑 看看')
+__plugin_meta__=PluginMetadata(name='约游戏开黑',description='本群自然语言约局、报名、候补、退出、取消和条件/人数提醒；已有同款车队时先列局再确认新建',usage='/开黑 今晚八点MC四个人；@我 说我也来/我要候补/退出/取消；说“新建车队”另开一队；/开黑 看看')
 store=GameStore(Path(__file__).resolve().parents[3]/'data/qq/games.sqlite3');_busy=set();FORWARDED=object()
 
 async def send_game_list(bot,event,rows,query=''):
