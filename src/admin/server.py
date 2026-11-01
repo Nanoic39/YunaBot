@@ -2290,6 +2290,24 @@ def create_app(driver, root: Path = ROOT):
         audit(request, '切换微信白名单', id6)
         return {'ok': True}
 
+    @app.post('/api/wechat/groups/{id6}/send', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def wechat_group_send(id6: str, body: dict, request: Request):
+        text = str(body.get('text') or '').strip()
+        if not text or len(text) > 1000:
+            raise HTTPException(409, '需要 1–1000 字的分享内容')
+        row = next((r for r in wechat_store.list_groups(True) if r['id6'] == id6), None)
+        if not row:
+            raise HTTPException(409, '该微信群不在白名单')
+        from src.agent.wechat_phone import WeChatPhone
+        try:
+            ok = await WeChatPhone(phone_client).send(row['name'], text)
+        except Exception as error:
+            raise HTTPException(409, f'微信群分享失败：{type(error).__name__}') from error
+        if not ok:
+            raise HTTPException(409, '微信群分享未完成')
+        audit(request, '微信白名单群分享', id6)
+        return {'ok': True, 'id6': id6}
+
     @app.post('/api/wechat/send', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def wechat_send(body: dict, request: Request):
         id6 = str(body.get('id6') or '').strip()
@@ -2338,8 +2356,11 @@ def create_app(driver, root: Path = ROOT):
         data = await run_in_threadpool(agent_control.snapshot)
         with agent_control._db() as db:
             real_usage = agent_control._usage(db, 'live')
+        phone_ops = [t for t in phone_agent.list_tasks() if any(
+            word in str(t.get('goal') or '') for word in ('支付', '购物', '购买', '充值', '下单', '付款', '支付宝'))][:30]
         return {'policy': data['policy'], 'usage': data['usage'], 'live_usage': real_usage,
                 'live_available': False, 'records': await run_in_threadpool(payments.history),
+                'phone_operations': phone_ops,
                 'grants': [g for g in data['grants'] if is_payment(g)],
                 'capabilities': [c for c in data['capabilities'] if is_payment({'capability': c['id']})],
                 'tasks': [task_summary(t) for t in data['tasks'] if is_payment(t)]}
