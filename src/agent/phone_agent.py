@@ -1068,6 +1068,17 @@ class PhoneAgent:
 class RealPhoneAgent(PhoneAgent):
     """真机执行器：复用手机观察/动作循环，忽略只属于浏览器电脑的发布参数。"""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 真机切换后不要把上一套虚拟电脑的未完成任务自动续到手机上。
+        self.restart_resume_pending = False
+        self.restart_resume_task_id = None
+        try:
+            if self.play is not None:
+                self.play.set_resume('')
+        except Exception:
+            pass
+
     def _public(self, task):
         return {**super()._public(task), "environment": task.get("environment", "phone")}
 
