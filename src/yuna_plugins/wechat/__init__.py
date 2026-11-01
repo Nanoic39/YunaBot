@@ -13,6 +13,7 @@ from src.agent.phone_play import phone_play
 from src.agent.runtime import get_phone_agent
 from src.agent.wechat import wechat_store
 from src.agent.wechat_phone import WeChatPhone
+from src.agent.self_memory import self_memory
 from src.agent.wechat_vision import WeChatVision
 
 require('nonebot_plugin_apscheduler')
@@ -107,6 +108,13 @@ async def _poll() -> None:
                               (contact['id6'], 'in', text[:1200], now))
                     d.execute('INSERT INTO messages(contact_id6,direction,text,created) VALUES(?,?,?,?)',
                               (contact['id6'], 'out', reply[:1200], now + 0.01))
+                try:
+                    self_memory.record_event(
+                        'wechat', 'chat',
+                        f'和微信联系人 {title} 聊天：收到「{text[:120]}」，回复「{reply[:120]}」',
+                        goal='微信聊天')
+                except Exception:
+                    pass
                 logger.info(f'[wechat] 已回复白名单联系人 {contact["id6"]}')
             except Exception as error:
                 logger.warning(f'[wechat] 微信回复失败：{type(error).__name__}')
