@@ -1089,16 +1089,24 @@ class PhoneAgent:
                 recent = [h.get('action') for h in task['history'][-5:]]
                 views = [h.get('view_hash') for h in task['history'][-5:]]
                 if len(recent) >= 5 and len(set(recent[-5:])) == 1 and all(views) and len(set(views))==1:
+                    task['stuck_count'] = int(task.get('stuck_count') or 0) + 1
+                    if task['stuck_count'] <= 3:
+                        task['owner_guidance'] = (
+                            (str(task.get('owner_guidance') or '').strip() + '\n')
+                            + f'你已连续 {task["stuck_count"]} 次重复 {recent[-1]} 且画面没变化。'
+                            + '必须换一种做法：换输入方式、换坐标/近邻控件、用 UI 重读、back 返回或换入口；不要重复同一个动作。'
+                        )[:1200]
+                        try:
+                            self.self_memory.record_event(
+                                str(task.get('environment') or 'phone'), 'stuck_retry',
+                                f'在「{str(task.get("goal") or "")[:60]}」卡住，决定换策略继续')
+                        except Exception:
+                            pass
+                        continue
                     task['status'] = 'failed'
-                    task['error'] = '连续重复同一个动作，已停止并等待下一次换策略'
-                    # 经验积累：记录卡住场景，下次任务的自我上下文会带着这条教训
-                    try:
-                        self.self_memory.record_event(
-                            str(task.get('environment') or 'phone'), 'stuck',
-                            f'在「{str(task.get("goal") or "")[:60]}」里连续重复 {recent_actions[-1] if recent_actions else "?"} 画面没变化，卡住了；下次遇到类似界面要早点换方向或换 grid 点位')
-                    except Exception:
-                        pass
+                    task['error'] = '连续重复同一个动作，已尝试三次换策略仍未突破'
                     return
+                task['stuck_count'] = 0
             task['status'] = 'failed'
             task['error'] = '达到步骤或时间上限'
         except asyncio.CancelledError:
@@ -1134,8 +1142,10 @@ class PhoneAgent:
             task.pop('model_screenshot', None)
             task['waiting_for_aid'] = ''
             if self.play is not None:
-                # 登录/密码类失败和已完成任务不自动续接，避免反复要密码。
-                if task['status'] in ('done','cancelled') or task.get('post_submit_attempted') or task.get('password_requested') or '登录' in task['goal']:
+                # 支付/充值测试和登录类任务结束后绝不自动续接，避免转去逛小黑盒。
+                if (task['status'] in ('done','cancelled') or task.get('post_submit_attempted')
+                        or task.get('password_requested') or task.get('payment_test_authorized')
+                        or '登录' in task['goal'] or '支付' in task['goal'] or '充值' in task['goal']):
                     self.play.set_resume('')
                 else:
                     self.play.set_resume(task['goal'])
