@@ -562,6 +562,12 @@ class PhoneAgent:
                     'status': 'awaiting_user_password',
                     'created': time.time(),
                 }
+                callback = getattr(self, 'payment_handoff_callback', None)
+                if callable(callback):
+                    try:
+                        await callback(task, task['payment_handoff'])
+                    except Exception as error:
+                        raise PhoneTaskError('支付交接记录失败：' + type(error).__name__) from error
             def _norm_title(text_value):
                 return re.sub(r'[\s①②③④⑤⑥⑦⑧⑨⑩,，。.、:：;；?？!！]', '', str(text_value or ''))
             answered = task.setdefault('aid_answers', {})

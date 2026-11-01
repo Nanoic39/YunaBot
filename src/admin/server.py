@@ -37,6 +37,7 @@ from src.agent.phone_agent import PhoneAgent, RealPhoneAgent, PhoneTaskError
 from src.agent.phone_play import PhonePlayError, phone_play
 from src.agent.wechat import wechat_store
 from src.agent.skills import skill_store
+from src.agent.payment_handoff import handoff_store
 from src.agent.runtime import set_phone_agent
 from src.agent.social import social_store, SocialError
 from src.agent.social_runtime import request_setup as request_social_setup, start_setup as start_social_setup
@@ -775,6 +776,10 @@ def create_app(driver, root: Path = ROOT):
         loader=getattr(plugin.module,'agent_chat_memory',None) if plugin else None
         return loader(goal) if callable(loader) else ''
     phone_agent.chat_memory_loader=agent_memory_loader
+    async def _record_payment_handoff(task, handoff):
+        return handoff_store.create(task.get('id') or '', handoff.get('merchant'), handoff.get('order_id'),
+                                    handoff.get('amount_minor'), handoff.get('purpose'))
+    phone_agent.payment_handoff_callback = _record_payment_handoff
     async def _share_to_whitelist_group(group: str, text: str):
         from src.agent.phone_agent import PhoneTaskError
         from src.agent.wechat_phone import WeChatPhone
@@ -2383,9 +2388,21 @@ def create_app(driver, root: Path = ROOT):
         return {'policy': data['policy'], 'usage': data['usage'], 'live_usage': real_usage,
                 'live_available': False, 'records': await run_in_threadpool(payments.history),
                 'phone_operations': phone_ops,
+                'payment_handoffs': handoff_store.list(100),
                 'grants': [g for g in data['grants'] if is_payment(g)],
                 'capabilities': [c for c in data['capabilities'] if is_payment({'capability': c['id']})],
                 'tasks': [task_summary(t) for t in data['tasks'] if is_payment(t)]}
+
+    @app.get('/api/agent/payment-handoffs', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def payment_handoffs():
+        return {'items': handoff_store.list(100)}
+
+    @app.post('/api/agent/payment-handoffs/{rid}/status', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def payment_handoff_status(rid: int, body: dict, request: Request):
+        if not handoff_store.status(rid, str(body.get('status') or 'updated'), str(body.get('note') or '')):
+            raise HTTPException(404, '支付交接不存在')
+        audit(request, '更新支付交接状态', str(rid))
+        return {'ok': True}
 
     @app.get('/api/agent/payments/records/{payment_id}', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def agent_payment_detail(payment_id: str):
