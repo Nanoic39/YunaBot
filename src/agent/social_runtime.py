@@ -70,6 +70,9 @@ async def start_setup(agent):
 
 async def tick():
     global _setup_aid
+    # 每日手机自由活动期间，不让小黑盒评论/发帖任务抢占同一台真机。
+    if (phone_play.snapshot().get('session') or {}).get('approved_by') == 'daily-phone-activity':
+        return
     meta=aid_store.get(_setup_aid) if _setup_aid else next((a for a in aid_store.metadata() if a.get('context')=='social-setup'),None)
     if meta and meta['status']=='answered':
         _setup_aid=meta['id']

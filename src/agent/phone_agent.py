@@ -311,8 +311,8 @@ class PhoneAgent:
 {{"thought":"简短判断","action":"tap","x":540,"y":1200}}
 可用 action：
 - tap: 优先给target_text，精确匹配界面文字（如"密码登录"）；只有没有文字的图标才用x,y
-- tap(grid): 游戏场景（无文字按钮）用网格点按：{"action":"tap","grid":"B2"}。截图已叠加 3x3 网格（列A/B/C 从左到右，行1/2/3 从上到下），先在网格里定位目标（门/开关/人物要去的方向），再给对应格名；格中心会被换算成像素
-- move: 游戏里人物移动用 {"action":"move","direction":"up|down|left|right","hold_ms":400}，比滑动坐标更可靠；走到门前靠近后用 tap(grid) 点门或用 key=66(Enter) 交互
+- tap(grid): 游戏场景（无文字按钮）用网格点按：{{"action":"tap","grid":"B2"}}。截图已叠加 3x3 网格（列A/B/C 从左到右，行1/2/3 从上到下），先在网格里定位目标（门/开关/人物要去的方向），再给对应格名；格中心会被换算成像素
+- move: 游戏里人物移动用 {{"action":"move","direction":"up|down|left|right","hold_ms":400}}，比滑动坐标更可靠；走到门前靠近后用 tap(grid) 点门或用 key=66(Enter) 交互
 - swipe: x1,y1,x2,y2,duration
 - text: text（不含密码和验证码；需要秘密时用 request_aid）
 - key: keycode
@@ -982,11 +982,6 @@ class PhoneAgent:
                 if login_tap:
                     task['login_tapped'] = True
                 observation = None
-                if prefetch_task is not None and not prefetch_task.done():
-                    try:
-                        await asyncio.wait_for(asyncio.shield(prefetch_task), timeout=2.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                        pass  # 预取仅用于暖机并行,失败无碍
                 if login_tap:
                     await asyncio.sleep(4)
                 observation = await self._observe(task)

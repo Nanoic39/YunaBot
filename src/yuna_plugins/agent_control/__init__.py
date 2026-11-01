@@ -1,6 +1,7 @@
 """自主能力的 QQ 超管私聊审批；独立于聊天开关，不进入对话记忆。"""
 import asyncio
 import json
+import os
 import random
 import sys
 import re
@@ -648,3 +649,215 @@ async def retry_phone_request():
             phone_play.request(retry['plan'], retry['duration_minutes'], '之前和哥哥说好晚点再问', resume_task_id=retry.get('resume_task_id'),resume_guidance=retry.get('resume_guidance',''))
     except Exception:
         logger.warning('[agent] 电脑重试请求生成失败')
+
+
+# ── 每日手机活动：先盘点应用，再自主选 2–3 个应用体验 ─────────────────────
+_DAILY_PHONE_FILE = ROOT / 'data' / 'agent' / 'phone_daily.json'
+_DAILY_APP_FILE = ROOT / 'data' / 'agent' / 'phone_apps.json'
+
+_APP_LABELS = {
+    'com.tencent.mm': '微信', 'com.tencent.mobileqq': 'QQ',
+    'com.ss.android.ugc.aweme': '抖音', 'com.xingin.xhs': '小红书',
+    'com.zhihu.android': '知乎', 'tv.danmaku.bili': '哔哩哔哩',
+    'com.netease.cloudmusic': '网易云音乐', 'com.xiaoheihe': '小黑盒',
+    'com.max.xiaoheihe': '小黑盒', 'com.android.chrome': 'Chrome',
+    'com.tencent.tmgp.sgame': '王者荣耀', 'com.tencent.tmgp.pubgmhd': '和平精英',
+    'com.miHoYo.Yuanshen': '原神', 'com.miHoYo.hkrpg': '崩坏：星穹铁道',
+    'com.tencent.qqmusic': 'QQ音乐', 'com.taobao.taobao': '淘宝',
+    'com.jingdong.app.mall': '京东', 'com.sina.weibo': '微博',
+    'com.tencent.weread': '微信读书', 'com.dragon.read': '番茄小说',
+}
+
+
+def _daily_phone_state() -> dict:
+    try:
+        value = json.loads(_DAILY_PHONE_FILE.read_text(encoding='utf-8'))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_daily_phone_state(state: dict) -> None:
+    try:
+        _DAILY_PHONE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _DAILY_PHONE_FILE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+        tmp.replace(_DAILY_PHONE_FILE)
+        _DAILY_PHONE_FILE.chmod(0o600)
+    except Exception:
+        logger.warning('[agent] 保存每日手机状态失败')
+
+
+def _daily_target(day: str) -> float:
+    seed = int(''.join(ch for ch in day if ch.isdigit()) or '0')
+    hour = 15 + seed % 7
+    minute = (seed * 13) % 60
+    return datetime.now(timezone(timedelta(hours=8))).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    ).timestamp()
+
+
+_SENSITIVE_APP = re.compile(
+    r'(bank|pay|wallet|auth|telegram|messenger|wechat|mobileqq|alipay|taobao|jd|weibo|'
+    r'office|mail|stock|finance|broker|vpn|tailscale|settings|launcher|cleanmaster|'
+    r'ehviewer|picacg|panda|bosszhipin|authenticator|security|clean|speedtest)', re.I
+)
+
+
+def _app_label(package: str) -> str:
+    return _APP_LABELS.get(package, package)
+
+
+def _safe_app(package: str) -> bool:
+    return bool(package and not _SENSITIVE_APP.search(package))
+
+
+async def _list_phone_apps(agent) -> list[dict]:
+    """读取手机已安装的第三方应用；不读通知、联系人或任何账号数据。"""
+    try:
+        health = await asyncio.wait_for(agent.phone.health(), 10)
+        if not isinstance(health, dict) or health.get('online') is False:
+            return []
+        result = await asyncio.wait_for(agent.phone.action({'action': 'apps'}), 20)
+        text = str((result or {}).get('output') or '')
+        packages = []
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith('package:'):
+                pkg = line.split(':', 1)[1].strip()
+                if pkg and pkg not in packages:
+                    packages.append(pkg)
+        rows = [{'package': p, 'label': _app_label(p)} for p in packages if _safe_app(p)][:120]
+        try:
+            _DAILY_APP_FILE.write_text(json.dumps(
+                {'scanned': time.time(), 'apps': rows}, ensure_ascii=False, indent=2
+            ), encoding='utf-8')
+            _DAILY_APP_FILE.chmod(0o600)
+        except Exception:
+            pass
+        return rows
+    except Exception as error:
+        logger.debug(f'[agent] 读取手机应用失败：{type(error).__name__}')
+        return []
+
+
+async def _plan_daily_phone(agent, apps: list[dict]) -> tuple[str, list[str]]:
+    if not apps:
+        return '', []
+    app_text = '\n'.join(f"- {a['label']}（{a['package']}）" for a in apps)[:4000]
+    memory = ''
+    loader = getattr(agent, 'chat_memory_loader', None)
+    if callable(loader):
+        try:
+            memory = str(loader('手机日常体验'))[:1200]
+        except Exception:
+            memory = ''
+    prompt = (
+        '你是Yuna，正在安排今天的手机自由活动。你可以从手机已安装应用中选择 2–3 个，'
+        '先了解它们，再规划一次 20 分钟左右的真实体验。只能选择下面列出的应用，'
+        '不能假装看到了没看到的内容。禁止登录账号、支付、下单、发布动态、私信陌生人、'
+        '修改系统设置、删除文件、安装或卸载应用；遇到登录/支付/权限弹窗就退出该应用。'
+        '优先体验轻松、公开、可观察的内容，例如音乐、阅读、知识、视频、游戏或工具；'
+        '不要选择银行、支付、购物结算、社交账号管理类操作。'
+        '\n已安装应用（只能从中选择）：\n' + app_text
+        + ('\n可参考的既有偏好（不是授权）：\n' + memory if memory else '')
+        + '\n只输出 JSON：{"apps":["应用名1","应用名2"],"plan":"20分钟内的具体体验计划，写清先做什么、再看什么、最后完成什么"}.'
+        ' apps 必须来自上面的已安装列表，最多 3 个；plan 不超过 300 字。'
+    )
+    try:
+        decision = await asyncio.wait_for(agent.llm.decide(prompt), 30)
+    except Exception:
+        return '', []
+    chosen = [str(x)[:60] for x in (decision.get('apps') or []) if str(x).strip()][:3]
+    plan = str(decision.get('plan') or '').strip()[:500]
+    if not plan:
+        return '', []
+    return plan, chosen
+
+
+async def _run_daily_phone(agent) -> bool:
+    if not agent or not agent.llm.available or getattr(agent, '_active', ''):
+        return False
+    current = phone_play.snapshot()
+    if current.get('status') != 'idle':
+        return False
+    try:
+        from src.agent.minecraft import get_minecraft_agent
+        game = get_minecraft_agent()
+        if game and game.active:
+            return False
+    except Exception:
+        pass
+    apps = await _list_phone_apps(agent)
+    if not apps:
+        return False
+    plan, chosen = await _plan_daily_phone(agent, apps)
+    if not plan:
+        return False
+    selected = [a for a in apps if a['label'] in chosen or a['package'] in chosen][:3]
+    package_hint = '；'.join(f"{a['label']}={a['package']}" for a in selected)
+    minutes = max(5, min(30, int(os.getenv('AGENT_PHONE_DAILY_MINUTES', '20'))))
+    goal = (
+        f'今天是每日手机自由活动。计划：{plan}。'
+        + (f'优先从这些已安装应用启动：{package_hint}。' if package_hint else '')
+        + '先观察首页和当前界面，再按计划体验；最多 3 个应用，每个只做公开、非破坏性的浏览和尝试。'
+        '禁止登录、支付、下单、发布、私信、修改系统设置、安装卸载；遇到登录/支付/权限弹窗直接退出该应用。'
+        '完成后用 finish 总结实际体验，不能把没做的操作说成做过。'
+    )[:1800]
+    req = None
+    try:
+        req = phone_play.request(plan, minutes, '每日手机自由活动', force=True)
+        approved = phone_play.approve(req['request']['id'], actor='daily-phone-activity')
+        await asyncio.wait_for(agent.start(goal, max_steps=24), 30)
+        logger.info(f'[agent] 每日手机活动已开始：{", ".join(chosen) or "自动选择"}｜{plan[:120]}')
+        return True
+    except Exception as error:
+        logger.warning(f'[agent] 每日手机活动启动失败：{type(error).__name__}')
+        try:
+            session = phone_play.snapshot().get('session') or {}
+            if session.get('approved_by') == 'daily-phone-activity':
+                phone_play.end('daily_phone_start_failed')
+        except Exception:
+            pass
+        return False
+
+
+@scheduler.scheduled_job('interval', minutes=2, id='agent_daily_phone_activity', max_instances=1, coalesce=True)
+async def daily_phone_activity():
+    """每天一次的手机自由活动；手机离线时只在当天窗口内重试。"""
+    try:
+        configured_phone = str(getattr(get_driver().config, 'agent_phone_url', '') or os.getenv('AGENT_PHONE_URL', '') or '')
+        if not configured_phone:
+            return
+        now = datetime.now(timezone(timedelta(hours=8)))
+        day = now.strftime('%Y-%m-%d')
+        state = _daily_phone_state()
+        if state.get('last_date') == day:
+            return
+        if state.get('target_date') != day:
+            # 首次接入当天立即做一次应用盘点和体验；之后每天按固定窗口运行。
+            had_history = bool(state.get('last_date'))
+            state = {'target_date': day, 'target_ts': (time.time() + 60) if not had_history else _daily_target(day)}
+            _save_daily_phone_state(state)
+        target = float(state.get('target_ts') or 0)
+        if target <= 0 or now.timestamp() < target:
+            return
+        if float(state.get('retry_at') or 0) > now.timestamp():
+            return
+        if now.hour >= 22:
+            return
+        agent = get_phone_agent()
+        if not agent or not agent.llm.available or getattr(agent, '_active', ''):
+            return
+        if phone_play.snapshot().get('status') != 'idle':
+            return
+        started = await _run_daily_phone(agent)
+        state['last_status'] = 'started' if started else 'failed'
+        state['last_attempt'] = time.time()
+        if started:
+            state['last_date'] = day
+        else:
+            state['retry_at'] = time.time() + 900
+        _save_daily_phone_state(state)
+    except Exception:
+        logger.warning('[agent] 每日手机活动调度失败')
