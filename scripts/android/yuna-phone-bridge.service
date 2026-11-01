@@ -1,0 +1,21 @@
+[Unit]
+Description=Yuna restricted Android phone bridge (wireless ADB)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/YunaGames
+
+[Service]
+Type=simple
+EnvironmentFile=-/YunaGames/Android/bridge/phone.env
+ExecStart=/usr/bin/python3 /YunaGames/Android/bridge/phone_bridge.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/YunaGames/Android
+StandardOutput=append:/YunaGames/Android/bridge/bridge.log
+StandardError=append:/YunaGames/Android/bridge/bridge.log
+
+[Install]
+WantedBy=multi-user.target

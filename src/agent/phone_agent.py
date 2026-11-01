@@ -165,6 +165,14 @@ class PhoneAgent:
             raise PhoneTaskError('未配置手机 Agent LLM')
         if self.play is not None and not self.play.can_operate():
             raise PhoneTaskError('现在不是手机时间；需要先向 owner 申请并获批')
+        try:
+            health = await asyncio.wait_for(self.phone.health(), 10)
+            if isinstance(health, dict) and health.get('online') is False:
+                raise PhoneTaskError('手机当前不在线或未授权，任务未创建；手机重新连接后再试')
+        except PhoneTaskError:
+            raise
+        except Exception as error:
+            raise PhoneTaskError(f'手机桥不可达，任务未创建：{type(error).__name__}') from error
         steps = self.max_steps if max_steps is None else max_steps
         if type(steps) is not int or not 1 <= steps <= 60:
             raise PhoneTaskError('步骤上限应为1到60')
@@ -1055,3 +1063,21 @@ class PhoneAgent:
             if task['status'] == 'done' and self.play is not None and self.play.can_operate():
                 self_decide_task = asyncio.create_task(self._decide_next(task))
                 self_decide_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
+
+class RealPhoneAgent(PhoneAgent):
+    """真机执行器：复用手机观察/动作循环，忽略只属于浏览器电脑的发布参数。"""
+
+    def _public(self, task):
+        return {**super()._public(task), "environment": task.get("environment", "phone")}
+
+    async def start(self, *args, **kwargs):
+        for key in ("no_owner_contact", "publish_authorization", "read_only", "social_setup"):
+            kwargs.pop(key, None)
+        result = await super().start(*args, **kwargs)
+        task = self.tasks.get(result.get("id") if isinstance(result, dict) else "")
+        if task:
+            task["environment"] = "phone"
+            self._save()
+            return self._public(task)
+        return result

@@ -31,9 +31,9 @@ from starlette.concurrency import run_in_threadpool
 
 from src.agent.control import AgentControl, ControlError
 from src.agent.providers import PROVIDERS, deepseek_balance
-from src.agent.phone import PhoneError
-from src.agent.computer import ComputerClient as PhoneClient, ComputerAgent as PhoneAgent
-from src.agent.phone_agent import PhoneTaskError
+from src.agent.phone import PhoneClient, PhoneError
+from src.agent.computer import ComputerClient, ComputerAgent
+from src.agent.phone_agent import PhoneAgent, RealPhoneAgent, PhoneTaskError
 from src.agent.phone_play import PhonePlayError, phone_play
 from src.agent.runtime import set_phone_agent
 from src.agent.social import social_store, SocialError
@@ -740,10 +740,19 @@ def create_app(driver, root: Path = ROOT):
     agent_control = AgentControl(root / 'data' / 'agent' / 'control.sqlite3')
     node_queue = NodeQueue(agent_control)
     payments = Payments(agent_control)
-    phone_client = PhoneClient(
-        str(getattr(driver.config, 'agent_computer_url', '') or '') or None,
-        str(getattr(driver.config, 'agent_computer_token', '') or '') or None,
-    )
+    phone_url = str(getattr(driver.config, 'agent_phone_url', '') or '').strip()
+    if phone_url:
+        phone_client = PhoneClient(
+            phone_url,
+            str(getattr(driver.config, 'agent_phone_token', '') or '') or None,
+        )
+        real_phone = True
+    else:
+        phone_client = ComputerClient(
+            str(getattr(driver.config, 'agent_computer_url', '') or '') or None,
+            str(getattr(driver.config, 'agent_computer_token', '') or '') or None,
+        )
+        real_phone = False
     def yuna_persona_loader():
         """给电脑/手机 Agent 注入 Yuna 的人设，操作设备的也是她本人。"""
         path = CHAT_DIR / 'character.txt'
@@ -752,7 +761,8 @@ def create_app(driver, root: Path = ROOT):
         except OSError:
             return ''
 
-    phone_agent = PhoneAgent(phone_client, AgentLLM(
+    phone_cls = RealPhoneAgent if real_phone else ComputerAgent
+    phone_agent = phone_cls(phone_client, AgentLLM(
         str(getattr(driver.config, 'chat_llm_api_base', '') or ''),
         str(getattr(driver.config, 'chat_llm_api_key', '') or ''),
         str(getattr(driver.config, 'chat_llm_model', '') or ''),
@@ -2135,7 +2145,9 @@ def create_app(driver, root: Path = ROOT):
         session = result.get('session') or {}
         goal = session.get('plan') or phone_play.snapshot().get('resume_goal') or '玩一会儿电脑'
         try:
-            if not await start_social_setup(phone_agent):
+            if real_phone:
+                await phone_agent.start(goal, max_steps=24)
+            elif not await start_social_setup(phone_agent):
                 await phone_agent.start(goal, max_steps=24)
             result['task_started'] = True
         except PhoneTaskError as error:

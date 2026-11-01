@@ -8,13 +8,14 @@ ROOT = "/YunaGames/Android"
 TOKEN_FILE = ROOT + "/bridge/token"
 AUDIT = ROOT + "/bridge/audit.jsonl"
 APKS = ROOT + "/apks"
-ADB = ROOT + "/sdk/platform-tools/adb"
+ADB = os.getenv("ADB_BIN") or (ROOT + "/sdk/platform-tools/adb")
+# 真机可填 Tailscale/内网 IP:端口，例如 100.x.x.x:5555；不要求手机接在电脑上。
+SERIAL = os.getenv("ANDROID_SERIAL") or os.getenv("PHONE_ADB_SERIAL") or "172.31.99.2:5555"
 ENV = {**os.environ, "HOME": ROOT + "/home", "ANDROID_HOME": ROOT + "/sdk",
        "ANDROID_SDK_ROOT": ROOT + "/sdk", "ANDROID_USER_HOME": ROOT + "/home/.android",
        "ANDROID_AVD_HOME": ROOT + "/avd", "TMPDIR": ROOT + "/tmp",
        "PATH": ROOT + "/sdk/platform-tools:" + os.environ.get("PATH", "")}
-
-ENV["ANDROID_SERIAL"] = "172.31.99.2:5555"
+ENV["ANDROID_SERIAL"] = SERIAL
 
 def token():
     if not os.path.exists(TOKEN_FILE):
@@ -25,9 +26,42 @@ def token():
 
 TOKEN = token()
 
+def _state(timeout=8):
+    try:
+        p = subprocess.run([ADB, "-s", SERIAL, "get-state"], env=ENV, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=timeout)
+        return p.returncode, p.stdout.decode("utf-8", "replace").strip(), p.stderr.decode("utf-8", "replace").strip()
+    except Exception as error:
+        return 1, "", str(error)
+
+
+def ensure_online():
+    """按需连接无线 ADB；手机暂时离线时返回明确错误，由调用方决定重试。"""
+    code, state, error = _state()
+    if code == 0 and state == "device":
+        return True
+    if ":" in SERIAL:
+        try:
+            subprocess.run([ADB, "connect", SERIAL], env=ENV, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=12)
+        except Exception:
+            pass
+        code, state, error = _state()
+    if code == 0 and state == "device":
+        return True
+    detail = (error or state or "device offline")[:300]
+    raise ValueError(f"手机离线或未授权（{SERIAL}）：{detail}")
+
+
 def adb(*args, timeout=90):
-    p = subprocess.run([ADB, *args], env=ENV, stdout=subprocess.PIPE,
+    ensure_online()
+    p = subprocess.run([ADB, "-s", SERIAL, *args], env=ENV, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, timeout=timeout)
+    if p.returncode != 0:
+        # 传输中断可能刚掉线，重连一次再试；不无限重试。
+        ensure_online()
+        p = subprocess.run([ADB, "-s", SERIAL, *args], env=ENV, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, timeout=timeout)
     if p.returncode != 0:
         raise ValueError(p.stderr.decode("utf-8", "replace")[-500:] or "adb failed")
     return p.stdout
@@ -63,11 +97,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(401, {"ok": False, "error": "unauthorized"})
         try:
             if self.path == "/health":
-                boot = shell("getprop", "sys.boot_completed").decode().strip()
-                top = shell("dumpsys", "activity", "activities").decode("utf-8", "ignore")
-                activity = next((line.strip() for line in top.splitlines() if "mResumedActivity" in line), "")
-                size = shell("wm", "size").decode().strip()
-                return self.send_json(200, {"ok": True, "boot": boot, "activity": activity, "size": size})
+                try:
+                    boot = shell("getprop", "sys.boot_completed").decode().strip()
+                    top = shell("dumpsys", "activity", "activities").decode("utf-8", "ignore")
+                    activity = next((line.strip() for line in top.splitlines() if "mResumedActivity" in line), "")
+                    size = shell("wm", "size").decode().strip()
+                    return self.send_json(200, {"ok": True, "online": True, "serial": SERIAL,
+                                                "boot": boot, "activity": activity, "size": size})
+                except Exception as error:
+                    return self.send_json(200, {"ok": True, "online": False, "serial": SERIAL,
+                                                "error": str(error)[:300]})
             if self.path == "/screenshot":
                 raw = adb("exec-out", "screencap", "-p", timeout=90)
                 self.send_response(200)
