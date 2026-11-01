@@ -768,10 +768,11 @@ class PhoneAgent:
                 allowed_final = (bool(task.get('payment_test_authorized')) and amount_ok
                                  and bool(task.get('secret_inputs', {}).get('password'))
                                  and label in {'确认付款', '确认支付', '立即付款'})
+                allowed_method = bool(task.get('payment_test_authorized')) and label in {'支付宝', '支付宝支付'}
                 allowed_open = bool(task.get('payment_test_authorized')) and label in {
-                    '去支付', '提交订单', '立即支付', '支付', '去付款'
+                    '去支付', '提交订单', '立即支付', '去付款'
                 } and not re.search(r'确认|密码|立即付款|确认付款', label)
-                if not (allowed_open or allowed_final):
+                if not (allowed_method or allowed_open or allowed_final):
                     task['cancel'].set(); raise PhoneTaskError('真实支付尚未接入，手机动作不能扣款')
             if re.fullmatch(r'(发布|发表|发帖|立即发布|确认发布)', label):
                 if task.get('post_submit_attempted'):
