@@ -79,9 +79,13 @@ class WeChatPhone:
         if not contact or not message:
             return False
         # 先退回聊天首页再重新启动，避免停留在上一次搜索/聊天页。
-        for _ in range(3):
-            await self.phone.action({'action': 'key', 'keycode': 4})
-            await asyncio.sleep(0.2)
+        try:
+            await self.phone.action({'action': 'force_stop', 'package': 'com.tencent.mm'})
+            await asyncio.sleep(0.5)
+        except Exception:
+            for _ in range(5):
+                await self.phone.action({'action': 'key', 'keycode': 4})
+                await asyncio.sleep(0.2)
         await self.phone.action({'action': 'launch', 'package': 'com.tencent.mm'})
         await asyncio.sleep(1.0)
         # 微信搜索页不暴露可读文本，使用固定入口 + 搜索结果首行。
@@ -119,7 +123,7 @@ class WeChatPhone:
                      int(send['y']) + int(send['h']) // 2)
         else:
             # 键盘弹出时输入栏上方，发送键位置固定；OCR 失败时兜底。
-            point = (1105, 1640)
+            point = (1105, 2580)
         await self.phone.action({'action': 'tap', 'x': point[0], 'y': point[1]})
         await asyncio.sleep(1.0)
         return True

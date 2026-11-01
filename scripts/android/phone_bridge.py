@@ -161,15 +161,15 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         old_ime = shell("settings", "get", "secure", "default_input_method").decode("utf-8", "ignore").strip()
                         shell("ime", "set", "com.android.adbkeyboard/.AdbIME")
-                        adb("shell", "am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", text)
+                        shell("am", "broadcast", "-a", "ADB_INPUT_TEXT", "--es", "msg", text)
                         time.sleep(0.4)
                         if old_ime and "adbkeyboard" not in old_ime.lower():
                             shell("ime", "set", old_ime)
                         out = b""
                         audit({"action": action, "ok": True, "method": "adbkeyboard"})
                         return self.send_json(200, {"ok": True, "output": ""})
-                    except Exception:
-                        pass
+                    except Exception as error:
+                        raise ValueError("中文输入失败：" + str(error)[:200])
                 if body.get("replace") is True:
                     shell("uiautomator", "dump", "/sdcard/yuna-input.xml", timeout=60)
                     current = shell("cat", "/sdcard/yuna-input.xml")
@@ -194,6 +194,11 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.fullmatch(re.escape(pkg)+r"/[A-Za-z0-9_.$]+", entry):
                     raise ValueError("未找到已安装应用的启动入口")
                 out = shell("am", "start", "-W", "-n", entry)
+            elif action == "force_stop":
+                pkg = str(body.get("package") or "")
+                if pkg not in ("com.tencent.mm",):
+                    raise ValueError("该应用不允许强制停止")
+                out = shell("am", "force-stop", pkg)
             elif action == "open_url":
                 url = str(body.get("url") or "")
                 if not re.fullmatch(r"https?://[^\s]{1,1900}", url):
