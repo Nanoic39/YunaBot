@@ -1137,7 +1137,7 @@ def _warning_reply_id(row: dict) -> int | None:
     raw = str(row.get("message_id") or "").split(":", 1)[0]
     try:
         value = int(raw)
-        return value if value > 0 else None
+        return value if value != 0 else None
     except (TypeError, ValueError):
         return None
 
