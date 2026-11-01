@@ -123,6 +123,6 @@ class WeChatVisionSkill:
             '只有发送按钮出现并点击后，聊天区出现这条消息才算 done。'
         )
         checker = WeChatPhone(self.phone)
-        await PhoneVisionSkill(self.phone, self.vision, 'wechat_send').run(
+        await PhoneVisionSkill(self.phone, self.vision, 'wechat_send', grounding=True).run(
             goal, max_steps=18, verify=lambda: checker._verify_sent(message))
         return True

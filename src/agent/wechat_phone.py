@@ -73,14 +73,55 @@ class WeChatPhone:
             return []
         return [r for r in rows if isinstance(r, dict) and r.get('text')]
 
-    async def _verify_sent(self, message: str) -> bool:
+    async def _input_point(self):
         rows = await self._ocr()
-        probe = message.replace(' ', '')[:6]
+        candidates = []
         for row in rows:
-            text = str(row.get('text') or '').replace(' ', '')
+            text = str(row.get('text') or '')
             y = int(row.get('y') or 0)
-            if probe and probe in text and 1400 < y < 2350:
+            if 1100 < y < 2300 and any(k in text for k in ('轻触说话', '输入', '按住说话', '发送')):
+                candidates.append(row)
+        if not candidates:
+            candidates = [r for r in rows if 1400 < int(r.get('y') or 0) < 2300]
+        if not candidates:
+            return 500, 1640
+        target = max(candidates, key=lambda r: int(r.get('y') or 0))
+        return int(target['x']) + int(target['w']) // 2, int(target['y']) + int(target['h']) // 2
+
+    async def _green_send(self):
+        """定位输入栏右侧的绿色发送按钮。"""
+        try:
+            import io
+            from PIL import Image
+            raw = await self.phone.screenshot()
+            pic = Image.open(io.BytesIO(raw)).convert('RGB')
+            width, height = pic.size
+            pix = pic.load()
+            xs, ys = [], []
+            for yy in range(int(height * 0.55), height, 2):
+                for xx in range(int(width * 0.60), width, 2):
+                    r, g, b = pix[xx, yy]
+                    if g > 120 and g > r * 1.35 and g > b * 1.20:
+                        xs.append(xx); ys.append(yy)
+            if len(xs) < 120:
+                return None
+            x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+            if x1 - x0 < 35 or y1 - y0 < 25:
+                return None
+            return (x0 + x1) // 2, (y0 + y1) // 2
+        except Exception:
+            return None
+
+    async def _verify_sent(self, message: str) -> bool:
+        probe = message.replace(' ', '')[:4]
+        for _ in range(3):
+            rows = await self._ocr()
+            still_in_input = any(
+                probe and probe in str(r.get('text') or '').replace(' ', '') and int(r.get('y') or 0) > 2300
+                for r in rows)
+            if not still_in_input:
                 return True
+            await asyncio.sleep(0.7)
         return False
 
     async def _open_existing_chat(self, contact: str) -> bool:
@@ -115,10 +156,17 @@ class WeChatPhone:
         # 已存在的会话优先从聊天列表进入，避免搜索页跳到“选择联系人”。
         if await self._open_existing_chat(contact):
             await asyncio.sleep(0.5)
-            await self.phone.action({'action': 'tap', 'x': 500, 'y': 2580})
+            point = await self._input_point()
+            await self.phone.action({'action': 'tap', 'x': point[0], 'y': point[1]})
             await asyncio.sleep(0.3)
             await self._type(message)
             await asyncio.sleep(0.5)
+            green = await self._green_send()
+            if green:
+                await self.phone.action({'action': 'tap', 'x': green[0], 'y': green[1]})
+                await asyncio.sleep(0.8)
+                if await self._verify_sent(message):
+                    return True
             rows = await self._ocr()
             send = next((r for r in rows if '发送' in str(r.get('text') or '')), None)
             if send:
@@ -156,7 +204,8 @@ class WeChatPhone:
         verify_text = ' '.join(str(r.get('text') or '') for r in verify)
         if 'AI搜索' in verify_text or '搜索网络结果' in verify_text:
             raise PhoneError('微信搜索结果点击后仍在搜索页')
-        await self.phone.action({'action': 'tap', 'x': 500, 'y': 2580})
+        point = await self._input_point()
+        await self.phone.action({'action': 'tap', 'x': point[0], 'y': point[1]})
         await asyncio.sleep(0.3)
         await self._type(message)
         await asyncio.sleep(0.5)

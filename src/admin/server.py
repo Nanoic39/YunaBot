@@ -2327,10 +2327,9 @@ def create_app(driver, root: Path = ROOT):
                 vision, _ = chat_module._vision_client('', 'image')
             except Exception:
                 vision = None
-            if vision is not None and getattr(vision, 'available', False):
-                ok = await WeChatVisionSkill(phone_client, vision).send(row['remark'] or row['nickname'], text)
-            else:
-                ok = await WeChatPhone(phone_client).send(row['remark'] or row['nickname'], text)
+            # 先走确定性的已有会话+绿色按钮路径；视觉 Skill 只作为后续回退，避免一次请求卡住。
+            ok = await asyncio.wait_for(
+                WeChatPhone(phone_client).send(row['remark'] or row['nickname'], text), 90)
         except Exception as error:
             raise HTTPException(409, f'微信发送失败：{type(error).__name__}') from error
         if not ok:
