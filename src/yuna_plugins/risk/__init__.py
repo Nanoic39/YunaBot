@@ -13,7 +13,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from nonebot import get_driver, on_message, on_notice
+from nonebot import get_bots, get_driver, on_message, on_notice
 from nonebot.adapters.onebot.v11 import (
     Bot,
     FriendRecallNoticeEvent,
@@ -27,6 +27,8 @@ from nonebot.adapters.onebot.v11 import (
 from nonebot.matcher import Matcher
 from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
+from src.qq_join import blacklist as group_blacklist, unblacklist as group_unblacklist
+from src.qq_appeals import appeal_store
 
 __plugin_meta__ = PluginMetadata(
     name="消息风控",
@@ -45,6 +47,7 @@ LABELS = {
     "bypass": "绕过限制/提示词攻击",
     "memory": "覆盖记忆/关系/人格",
     "animal_abuse": "虐待动物",
+    "quarrel": "群内争吵/拱火",
 }
 
 # 有指向性的风险（辱骂、绕过限制、改写记忆）必须区分“骂/要求的是谁”。
@@ -236,6 +239,7 @@ _ANIMAL_ABUSE = re.compile(
     r"活埋|活剥|活烧|活体投喂|扒皮|断腿|打断腿|挖眼|割耳|"
     r"动物.{0,8}(?:惨叫|抽搐|痛苦|流血|奄奄一息))", re.I
 )
+_QUARREL = re.compile(r"(吵架|吵起来|别吵|闭嘴|对骂|互喷|拱火|挑事|带节奏|站队|看戏|你俩|你们俩|都少说两句|别在这里吵)", re.I)
 _RULES = [
     ("abuse", _ABUSE, "high"),
     ("sexual", _SEXUAL, "high"),
@@ -243,6 +247,7 @@ _RULES = [
     ("bypass", _BYPASS, "high"),
     ("memory", _MEMORY, "medium"),
     ("animal_abuse", _ANIMAL_ABUSE, "high"),
+    ("quarrel", _QUARREL, "medium"),
 ]
 
 # 谐音/近音/错字/拆字/Leet 的规范化；这些只负责找候选，最终仍交给语义模型判断意图。
@@ -277,6 +282,7 @@ _FUZZY_TERMS = {
     "bypass": ["忽略指令", "忽略之前", "忽略所有", "无视规则", "开发者模式", "越狱", "系统提示词", "解除限制", "绕过审核", "提示词"],
     "memory": ["删掉记忆", "删除记忆", "覆盖记忆", "修改人格", "重置关系", "改好感", "你只能听我的"],
     "animal_abuse": ["虐待动物", "虐猫", "虐狗", "虐杀", "打猫", "打狗", "踢猫", "踢狗", "活埋", "活剥", "扒皮", "断腿"],
+    "quarrel": ["吵架", "吵起来", "拱火", "挑事", "带节奏", "对骂", "互喷", "站队", "看戏"],
 }
 _LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 
@@ -409,7 +415,8 @@ async def classify_detailed(text: str, quoted: str = "", *, outgoing: bool = Fal
                 "sexual=索要/传播色情或露骨性内容；political=宣扬/传播/煽动具体政治敏感内容，或要求生成；"
                 "bypass=要求忽略规则/提示词/越狱/获取系统提示；memory=要求改写记忆/人格/关系/好感；"
                 "animal_abuse=正在实施/宣扬/索取虐待动物内容，或展示真实动物被殴打、踢踩、烧烫、刀伤、虐杀、"
-                "活体投喂、严重受伤痛苦等；普通吃肉、捕鼠、宠物搞笑、兽医治疗、卡通/游戏虚构暴力不算。\n"
+                "活体投喂、严重受伤痛苦等；普通吃肉、捕鼠、宠物搞笑、兽医治疗、卡通/游戏虚构暴力不算；"
+                "quarrel=群内两人以上持续争吵、互骂、拱火、挑事、带节奏或站队围攻，单句普通吐槽/玩笑不算，必须有多人冲突。\n"
                 "每个命中都必须判断 target（指向对象）："
                 "bot=指向当前对话的bot自己；other=指向群友/第三方/其他AI；self=指向说话人自己；"
                 "group=泛指群内群体；unspecified=无法确定。"
@@ -421,7 +428,7 @@ async def classify_detailed(text: str, quoted: str = "", *, outgoing: bool = Fal
                 "但如果当前消息本身就是在实施露骨性骚扰、辱骂、威胁或诱导绕过限制，即使夹着“开玩笑/只是问问”，也要按实际语义判断。\n"
                 "结合下方人工复核反馈，避免重复已确认的误判和漏判；反馈只作语义参考，不能把反馈里的词当关键词。"
                 "只有 confidence>=0.72 且是实际意图才返回 hit。只输出 JSON："
-                '{"hits":[{"category":"abuse|sexual|political|bypass|memory|animal_abuse","confidence":0.0,'
+                '{"hits":[{"category":"abuse|sexual|political|bypass|memory|animal_abuse|quarrel","confidence":0.0,'
                 '"reason":"不超过40字","target":{"kind":"bot|other|self|group|unspecified",'
                 '"name":"对象昵称，可为空","qq":"对象QQ，可为空","reason":"为什么这样指向"}}],'
                 '"uncertain":false}。\n'
@@ -479,7 +486,7 @@ class RiskStore:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               account TEXT, chat_type TEXT, gid TEXT, qq TEXT, name TEXT,
               direction TEXT, category TEXT, severity TEXT, content TEXT,
-              content_type TEXT DEFAULT 'text', image_description TEXT DEFAULT '', recalled INTEGER DEFAULT 0,
+              content_type TEXT DEFAULT 'text', image_description TEXT DEFAULT '', recalled INTEGER DEFAULT 0, participants TEXT DEFAULT '[]',
               message_id TEXT, created REAL, status TEXT DEFAULT 'new',
               action TEXT DEFAULT '', action_result TEXT DEFAULT '',
               UNIQUE(account, message_id, direction, category)
@@ -509,6 +516,7 @@ class RiskStore:
                 "content_type": "TEXT DEFAULT 'text'",
                 "image_description": "TEXT DEFAULT ''",
                 "recalled": "INTEGER DEFAULT 0",
+                "participants": "TEXT DEFAULT '[]'",
             },
             "reviews": {
                 "target": "TEXT DEFAULT '{}'",
@@ -527,7 +535,7 @@ class RiskStore:
         return conn
 
     def add(self, account, chat_type, gid, qq, name, direction, category, severity, content, message_id,
-            target=None, content_type="text", image_description=""):
+            target=None, content_type="text", image_description="", participants=None):
         with self.db() as d:
             cur = d.execute(
                 "INSERT OR IGNORE INTO events(account,chat_type,gid,qq,name,direction,category,severity,content,"
@@ -810,6 +818,31 @@ def _review_context(event: MessageEvent, text: str, direction: str) -> list[dict
         return []
 
 
+def _quarrel_participants(event: MessageEvent) -> list[dict]:
+    """从近期群聊中收集吵架参与者；只是给管理员/警告提供名单，不替代语义确认。"""
+    gid = str(getattr(event, "group_id", "") or "")
+    if not gid:
+        return []
+    try:
+        from src.yuna_plugins.chat import _recent
+        rows = list(_recent.get(gid, []))[-16:]
+    except Exception:
+        rows = []
+    out = []
+    seen = set()
+    for row in rows:
+        if str(row.get("role") or "") != "user":
+            continue
+        qq = str(row.get("qq") or "")
+        if not qq.isdigit() or qq in seen:
+            continue
+        seen.add(qq)
+        out.append({"qq": qq, "name": str(row.get("name") or qq)[:30]})
+    if not any(str(r.get("qq")) == str(getattr(event, "user_id", "")) for r in out):
+        out.append({"qq": str(getattr(event, "user_id", "")), "name": _name(event)})
+    return out[:12]
+
+
 _IMAGE_RISK_CACHE: dict[str, tuple[float, dict]] = {}
 
 
@@ -969,10 +1002,14 @@ async def record_and_notify(bot: Bot, event: MessageEvent, text: str, direction:
                                          quoted_from=quoted_from)
         if audited.get("hits") or audited.get("uncertain"):
             detail = audited
+    participants = _quarrel_participants(event) if any(
+        str(hit.get("category")) == "quarrel" for hit in (detail.get("hits") or [])
+    ) else []
     for hit in detail.get("hits") or []:
         rid = store.add(account, chat_type, gid, qq, name, direction, hit["category"], hit["severity"],
                         content, message_id, target=hit.get("target"),
-                        content_type=content_type, image_description=image_description)
+                        content_type=content_type, image_description=image_description,
+                        participants=participants if hit.get("category") == "quarrel" else [])
         if rid:
             row = store.get(rid)
             if row:
@@ -1068,7 +1105,7 @@ async def review_replay(review_ids=None, limit: int = 20) -> dict:
 
 
 def _parse_id(text: str) -> tuple[str, int, list[str]]:
-    m = re.match(r"^风控(列表|详情|警告|禁言|退群|忽略|清空)\s*[#＃]?\s*(\d+)?\s*(.*)$", str(text or "").strip())
+    m = re.match(r"^风控(列表|详情|警告|禁言|踢出并拉黑|踢出|退群|忽略|清空)\s*[#＃]?\s*(\d+)?\s*(.*)$", str(text or "").strip())
     if not m:
         return "", 0, []
     return m.group(1), int(m.group(2) or 0), m.group(3).split()
@@ -1076,7 +1113,7 @@ def _parse_id(text: str) -> tuple[str, int, list[str]]:
 
 def _parse_reply_action(text: str):
     """引用风控通知时，命令不再需要携带编号。"""
-    m = re.fullmatch(r"(?:风控)?\s*(忽略|不用管|取消|警告|禁言|退群)\s*(.*)", str(text or "").strip())
+    m = re.fullmatch(r"(?:风控)?\s*(忽略|不用管|取消|警告|禁言|踢出并拉黑|踢出|退群)\s*(.*)", str(text or "").strip())
     if not m:
         return None
     action = m.group(1)
@@ -1124,6 +1161,15 @@ def _warning_message(row: dict) -> str:
         f"指向对象：{target}\n"
     )
     body = _warning_body(row)
+    if str(row.get("category")) == "quarrel":
+        try:
+            people = row.get("participants") or "[]"
+            people = json.loads(people) if isinstance(people, str) else people
+        except Exception:
+            people = []
+        names = [str(p.get("name") or p.get("qq")) for p in people if isinstance(p, dict)]
+        if names:
+            body += "\n涉及成员：" + "、".join(names[:12])
     tail = (
         "\n处理要求：请立即停止发布同类内容；继续发布将按群规处理。\n"
         "请群内所有成员引以为戒，不要发布、传播或索要类似内容。"
@@ -1133,6 +1179,24 @@ def _warning_message(row: dict) -> str:
     return head + body + tail
 
 
+async def _send_public_warning(bot: Bot, row: dict) -> None:
+    gid = str(row.get("gid") or "")
+    if not gid.isdigit():
+        return
+    segments = []
+    reply_id = _warning_reply_id(row) if not row.get("recalled") else None
+    if reply_id:
+        segments.append(MessageSegment.reply(reply_id))
+    if str(row.get("qq") or "").isdigit():
+        segments.append(MessageSegment.at(str(row["qq"])))
+        segments.append(MessageSegment.text(" "))
+    segments.append(MessageSegment.text(_warning_message(row)))
+    try:
+        await bot.send_group_msg(group_id=int(gid), message=Message(segments) if len(segments) > 1 else segments[0])
+    except Exception as error:
+        logger.debug(f"[risk] 处理前公开警告失败：{type(error).__name__}")
+
+
 def _warning_reply_id(row: dict) -> int | None:
     raw = str(row.get("message_id") or "").split(":", 1)[0]
     try:
@@ -1140,6 +1204,81 @@ def _warning_reply_id(row: dict) -> int | None:
         return value if value != 0 else None
     except (TypeError, ValueError):
         return None
+
+
+async def _create_appeal_hint(bot: Bot, row: dict, action: str) -> None:
+    qq = str(row.get("qq") or "")
+    if not qq.isdigit() or qq == str(getattr(bot, "self_id", "")):
+        return
+    try:
+        aid = appeal_store.create(int(row["id"]), str(bot.self_id), qq, str(row.get("gid") or ""), action)
+        text = (
+            f"【风控申诉】事件 #{row['id']}｜{LABELS.get(row.get('category'), row.get('category'))}｜处理：{action}\n"
+            "如果你认为这是误判，请直接引用这条消息，回复事实经过和申诉理由；只发送申诉内容，不会进入普通聊天。\n"
+            "管理员复核后会在这里回执结果。"
+        )
+        sent = await bot.send_private_msg(user_id=int(qq), message=MessageSegment.text(text))
+        mid = sent.get("message_id") if isinstance(sent, dict) else None
+        appeal_store.notice(aid, mid)
+    except Exception as error:
+        logger.debug(f"[risk] 申诉提示发送失败：{type(error).__name__}")
+
+
+async def _notify_appeal(app: dict) -> None:
+    text = (
+        "【风控申诉待处理】\n"
+        f"申诉 #{app.get('id')}｜原风控 #{app.get('risk_id')}｜用户 {app.get('qq')}｜群 {app.get('gid') or '私聊'}\n"
+        f"处理：{app.get('action')}\n理由：{str(app.get('text') or '')[:800]}\n"
+        "回复「申诉通过 #编号」或「申诉驳回 #编号」。"
+    )
+    for owner in owners():
+        try:
+            bot = next(iter(get_bots().values()), None)
+            if bot:
+                await bot.send_private_msg(user_id=int(owner), message=MessageSegment.text(text[:1800]))
+        except Exception as error:
+            logger.debug(f"[risk] 申诉通知失败：{type(error).__name__}")
+
+
+async def _decide_appeal(bot: Bot, app: dict, approved: bool, note: str = "") -> str:
+    if not appeal_store.decide(int(app["id"]), "approved" if approved else "rejected", note):
+        return "这条申诉已经处理过了。"
+    qq = str(app.get("qq") or "")
+    gid = str(app.get("gid") or "")
+    action = str(app.get("action") or "")
+    if approved:
+        if gid and qq:
+            try:
+                if action.startswith("禁言") or action == "mute":
+                    await bot.set_group_ban(group_id=int(gid), user_id=int(qq), duration=0)
+                group_unblacklist(str(bot.self_id), gid, qq)
+            except Exception as error:
+                logger.warning(f"[risk] 执行申诉恢复失败：{type(error).__name__}")
+        try:
+            await bot.send_private_msg(user_id=int(qq), message=MessageSegment.text("你的风控申诉已通过；相关限制会解除，之后请遵守群规。"))
+        except Exception:
+            pass
+        return f"申诉 #{app['id']} 已通过。"
+    try:
+        await bot.send_private_msg(user_id=int(qq), message=MessageSegment.text("你的风控申诉未通过，原处理保持不变。"))
+    except Exception:
+        pass
+    return f"申诉 #{app['id']} 已驳回。"
+
+
+def _quarrel_targets(row: dict) -> list[dict]:
+    try:
+        people = json.loads(row.get("participants") or "[]")
+    except Exception:
+        people = []
+    out = []
+    for p in people if isinstance(people, list) else []:
+        if isinstance(p, dict) and str(p.get("qq") or "").isdigit():
+            out.append({"qq": str(p["qq"]), "name": str(p.get("name") or p["qq"])[:30]})
+    speaker = str(row.get("qq") or "")
+    if speaker.isdigit() and not any(p["qq"] == speaker for p in out):
+        out.append({"qq": speaker, "name": str(row.get("name") or speaker)})
+    return out[:12]
 
 
 async def _apply_owner_action(bot: Bot, event: PrivateMessageEvent, row: dict, action: str, rest: list[str]) -> bool:
@@ -1170,12 +1309,58 @@ async def _apply_owner_action(bot: Bot, event: PrivateMessageEvent, row: dict, a
             else:
                 await bot.send_private_msg(user_id=int(row["qq"]), message=MessageSegment.text(warning))
             store.update(rid, "handled", "warn", mode)
+            await _create_appeal_hint(bot, row, "警告")
             await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"已向 {row['qq']} 发送{mode}警告。"))
         except Exception as error:
             await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"警告失败：{type(error).__name__}"))
         return True
+    if action in {"踢出", "踢出并拉黑"}:
+        if not row.get("gid"):
+            await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text("私聊事件不能踢出群。"));return True
+        await _send_public_warning(bot, row)
+        if str(row.get("category")) == "quarrel" and any(x in rest for x in ("全部", "所有", "全体")):
+            done = []
+            for person in _quarrel_targets(row):
+                try:
+                    await bot.set_group_kick(group_id=int(row["gid"]), user_id=int(person["qq"]), reject_add_request=bool(action == "踢出并拉黑"))
+                    if action == "踢出并拉黑":
+                        group_blacklist(str(bot.self_id), str(row["gid"]), person["qq"])
+                    done.append(person["name"])
+                except Exception:
+                    continue
+            store.update(rid, "handled", "kick_many", "、".join(done))
+            await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text("已处理吵架参与者：" + ("、".join(done) or "无成功对象")))
+            return True
+        try:
+            await bot.set_group_kick(group_id=int(row["gid"]), user_id=int(row["qq"]), reject_add_request=bool(action == "踢出并拉黑"))
+            if action == "踢出并拉黑":
+                group_blacklist(str(bot.self_id), str(row["gid"]), str(row["qq"]))
+            store.update(rid, "handled", "kick_blacklist" if action == "踢出并拉黑" else "kick", "已踢出" + ("并拉黑" if action == "踢出并拉黑" else ""))
+            await _create_appeal_hint(bot, row, action)
+            await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"已踢出 {row['qq']}" + ("并拉黑，后续加群申请会被拒绝。" if action == "踢出并拉黑" else "。")))
+        except Exception as error:
+            await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"踢出失败，可能没有群管理权限：{type(error).__name__}"))
+        return True
     if action == "禁言":
         minutes = 10
+        if str(row.get("category")) == "quarrel" and any(x in rest for x in ("全部", "所有", "全体")):
+            for token in rest:
+                if token.isdigit():
+                    minutes = max(1, min(43200, int(token)))
+                    break
+            if not row.get("gid"):
+                await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text("私聊事件不能禁言。"));return True
+            await _send_public_warning(bot, row)
+            done = []
+            for person in _quarrel_targets(row):
+                try:
+                    await bot.set_group_ban(group_id=int(row["gid"]), user_id=int(person["qq"]), duration=minutes * 60)
+                    done.append(person["name"])
+                except Exception:
+                    continue
+            store.update(rid, "handled", "mute_many", f"{minutes}分钟：" + "、".join(done))
+            await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"已禁言吵架参与者 {minutes} 分钟：" + ("、".join(done) or "无成功对象")))
+            return True
         for token in rest:
             if token.isdigit():
                 minutes = max(1, min(43200, int(token)))
@@ -1183,9 +1368,11 @@ async def _apply_owner_action(bot: Bot, event: PrivateMessageEvent, row: dict, a
         if not row.get("gid"):
             await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text("私聊事件不能禁言。"))
             return True
+        await _send_public_warning(bot, row)
         try:
             await bot.set_group_ban(group_id=int(row["gid"]), user_id=int(row["qq"]), duration=minutes * 60)
             store.update(rid, "handled", "mute", f"{minutes} 分钟")
+            await _create_appeal_hint(bot, row, f"禁言{minutes}分钟")
             await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"已禁言 {row['qq']} {minutes} 分钟。"))
         except Exception as error:
             await bot.send_private_msg(user_id=owner_id, message=MessageSegment.text(f"禁言失败，可能没有群管理权限：{type(error).__name__}"))
@@ -1207,6 +1394,30 @@ async def _apply_owner_action(bot: Bot, event: PrivateMessageEvent, row: dict, a
 async def _handle_owner_command(bot: Bot, event: PrivateMessageEvent, text: str) -> bool:
     if str(event.user_id) not in owners():
         return False
+    am = re.match(r"^申诉(列表|通过|驳回)\s*[#＃]?\s*(\d+)?", str(text or "").strip())
+    if am:
+        kind = am.group(1)
+        if kind == "列表":
+            rows = appeal_store.pending(50)
+            if not rows:
+                msg = "目前没有待处理申诉。"
+            else:
+                msg = "\n".join(
+                    f"申诉 #{r['id']}｜原风控 #{r['risk_id']}｜{r['qq']}｜{r['action']}｜{str(r.get('text') or '')[:120]}"
+                    for r in rows[:30]
+                )
+            await bot.send_private_msg(user_id=int(event.user_id), message=MessageSegment.text(msg[:3500]))
+            return True
+        if not am.group(2):
+            await bot.send_private_msg(user_id=int(event.user_id), message=MessageSegment.text("请带上申诉编号，例如「申诉通过 #12」。"))
+            return True
+        app = appeal_store.get(int(am.group(2)))
+        if not app:
+            await bot.send_private_msg(user_id=int(event.user_id), message=MessageSegment.text("没有找到这条申诉。"))
+            return True
+        result = await _decide_appeal(bot, app, kind == "通过")
+        await bot.send_private_msg(user_id=int(event.user_id), message=MessageSegment.text(result))
+        return True
     action, rid, rest = _parse_id(text)
     if not action:
         return False
@@ -1229,9 +1440,34 @@ async def _handle_owner_command(bot: Bot, event: PrivateMessageEvent, text: str)
     if action == "详情":
         await _send_owner_event(bot, int(event.user_id), row)
         return True
-    if action in {"忽略", "警告", "禁言", "退群"}:
+    if action in {"忽略", "警告", "禁言", "踢出", "踢出并拉黑", "退群"}:
         return await _apply_owner_action(bot, event, row, action, rest)
     return False
+
+
+appeal_matcher = on_message(priority=-2, block=False)
+
+
+@appeal_matcher.handle()
+async def _appeal_gate(bot: Bot, event: PrivateMessageEvent, matcher: Matcher):
+    """私聊申诉优先于普通聊天/好友权限：引用申诉提示时只记录申诉。"""
+    if str(event.user_id) in owners():
+        return
+    quoted = getattr(event, "reply", None)
+    mid = getattr(quoted, "message_id", None) if quoted is not None else None
+    if mid is None:
+        return
+    app = appeal_store.by_notice(str(event.user_id), mid)
+    if not app:
+        return
+    text = str(event.get_plaintext() or "").strip()
+    matcher.stop_propagation()
+    if not text:
+        await matcher.finish("请在这条申诉里写上事实经过和理由；管理员会复核。")
+        return
+    appeal_store.submit(int(app["id"]), text)
+    await _notify_appeal({**app, "text": text, "status": "pending"})
+    await matcher.finish("申诉已收到，管理员复核后会在这里回执结果。")
 
 
 risk_matcher = on_message(priority=0, block=False)

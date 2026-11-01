@@ -7,13 +7,17 @@ import re
 import weakref
 from pathlib import Path
 from nonebot import get_driver,get_bots,on_message,on_request,on_notice,require
-from nonebot.adapters.onebot.v11 import Bot,PrivateMessageEvent,FriendRequestEvent,FriendAddNoticeEvent,MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    Bot,PrivateMessageEvent,FriendRequestEvent,FriendAddNoticeEvent,
+    GroupRequestEvent,GroupIncreaseNoticeEvent,MessageSegment,
+)
 from nonebot.plugin import PluginMetadata
 from nonebot.matcher import Matcher
 from nonebot.log import logger
 from src.agent.reply_routes import reply_routes,quoted_id
 from src.qq_access import access_store,understand_access,whitelist_grant
 from src.qq_autonomy import clean
+from src.qq_join import blacklist as group_blacklist, is_blacklisted as group_is_blacklisted
 from .friend_watch import FriendWatchStore
 require('nonebot_plugin_apscheduler')
 from nonebot_plugin_apscheduler import scheduler
@@ -40,8 +44,15 @@ async def notify(bot):
       name=clean(profile.get('nickname',''),60)
       if name:access_store.identify(row['id'],name);row['note']=name+'：'+row['note']
      except Exception:pass
-    who=row['qq'];kind='想加我为好友' if row['kind']=='friend' else '私聊了我，但还没有聊天权限'
-    text=f'{who} {kind}。附言摘要：{clean(row["note"],120)}\n请回复这条消息告诉我怎么处理（不引用的消息正常聊天）。可以只同意加好友（先聊三轮），也可以开放聊天，并指定每天额度。参考：轻量10000、常用50000 tokens；这是输入与输出合计，达到后暂停后续回复，单次可能越过阈值；不指定则不限。'
+    who=row['qq']
+    if row['kind']=='group':
+        meta=_group_meta(row)
+        kind='邀请 bot 加入群' if meta.get('sub_type')!='add' else '申请让 bot 加入群'
+        text=(f'{who} {kind} {meta.get("gid") or "?"}。附言：{clean(meta.get("comment") or "",120) or "无"}\n'
+              f'回复「同意加群 #{row["id"]}」或「拒绝加群 #{row["id"]}」处理；不会自动同意。')
+    else:
+        kind='想加我为好友' if row['kind']=='friend' else '私聊了我，但还没有聊天权限'
+        text=f'{who} {kind}。附言摘要：{clean(row["note"],120)}\n请回复这条消息告诉我怎么处理（不引用的消息正常聊天）。可以只同意加好友（先聊三轮），也可以开放聊天，并指定每天额度。参考：轻量10000、常用50000 tokens；这是输入与输出合计，达到后暂停后续回复，单次可能越过阈值；不指定则不限。'
     try:
      sent=await bot.send_private_msg(user_id=int(owner),message=MessageSegment.text(text));access_store.notified(row['id'],owner);_sent.append(time.time());_retry.pop(key,None)
      reply_routes.bind(bot.self_id,owner,sent.get('message_id') if isinstance(sent,dict) else None,'access',row['id'])
@@ -52,6 +63,14 @@ def _request_rows(account):
     return access_store.pending_all(account)
 
 
+def _group_meta(row):
+    try:
+        value=json.loads(row.get('note') or '{}')
+        return value if isinstance(value,dict) else {}
+    except Exception:
+        return {}
+
+
 def _request_line(index,row):
     if str(row.get('flag') or '').startswith('doubt:'):
         kind='可疑好友申请（被过滤）'
@@ -59,6 +78,10 @@ def _request_line(index,row):
         kind='好友申请' if row.get('kind')=='friend' else '私聊权限申请'
     note=clean(row.get('note') or '',100)
     mark='（已过期，仍可处理）' if row.get('state')=='expired' else ''
+    if row.get('kind')=='group':
+        meta=_group_meta(row)
+        kind='加群邀请' if meta.get('sub_type')!='add' else '加群申请'
+        note=f'群 {meta.get("gid") or "?"}｜邀请人 {row.get("qq")}｜{clean(meta.get("comment") or "",80) or "无附言"}'
     return f'{index}. {row.get("qq")} {kind}{mark}｜{note or "无附言"}'
 
 
@@ -70,6 +93,61 @@ async def _send_owner(bot,text):
     except Exception as e:logger.warning(f'[qq_access] 管理员回复失败 {type(e).__name__}')
 
 
+def _group_row_meta(row: dict) -> dict:
+    try:
+        value=json.loads(row.get('note') or '{}')
+        return value if isinstance(value,dict) else {}
+    except Exception:
+        return {}
+
+
+def _latest_group_row(account: str, gid: str) -> dict | None:
+    try:
+        with access_store.db() as d:
+            rows=[dict(r) for r in d.execute("SELECT * FROM requests WHERE account=? AND kind='group' ORDER BY id DESC LIMIT 20",(str(account),))]
+        for row in rows:
+            if str(_group_row_meta(row).get('gid') or '')==str(gid):
+                return row
+    except Exception:
+        pass
+    return None
+
+
+async def _send_inviter(bot, qq: str, text: str) -> None:
+    if not str(qq or '').isdigit():
+        return
+    try:
+        await bot.send_private_msg(user_id=int(qq), message=MessageSegment.text(text[:1200]))
+    except Exception as error:
+        logger.debug(f'[qq_access] 邀请人回执失败：{type(error).__name__}')
+
+
+async def _process_group_request(bot, owner_id: int, row: dict, approve: bool) -> str:
+    """处理管理员对加群邀请/申请的决定；不会在管理员未同意时自动同意。"""
+    meta=_group_row_meta(row);gid=str(meta.get('gid') or '');flag=str(row.get('flag') or '')
+    sub=str(meta.get('sub_type') or 'invite');inviter=str(meta.get('inviter') or row.get('qq') or '')
+    if not access_store.transition(row['id'], 'pending', 'executing'):
+        return '这条加群请求已经被处理过了。'
+    try:
+        if flag:
+            params={'flag':flag,'sub_type':sub,'approve':bool(approve)}
+            if not approve:params['reason']='管理员未同意'
+            await asyncio.wait_for(bot.call_api('set_group_add_request',**params),10)
+        access_store.transition(row['id'],'executing','done' if approve else 'rejected')
+        if approve:
+            if flag:
+                await _send_inviter(bot,inviter,f'管理员已同意 bot 加入群 {gid}。')
+                return f'已同意加入群 {gid}。'
+            await _send_inviter(bot,inviter,f'管理员已同意 bot 加入群 {gid}，但当前没有有效邀请凭据；请重新邀请 bot。')
+            return f'已记录同意，但邀请凭据已失效；已通知邀请人重新邀请。'
+        await _send_inviter(bot,inviter,f'管理员拒绝了 bot 加入群 {gid} 的邀请。')
+        return f'已拒绝加入群 {gid}，并回执邀请人。'
+    except Exception as error:
+        access_store.transition(row['id'],'executing','unknown')
+        logger.warning(f'[qq_access] 处理加群请求失败：{type(error).__name__}')
+        return '操作结果未确认，不会自动重复；请核对群邀请状态。'
+
+
 async def handle_owner_friend_commands(bot,event,text,target_qq):
     """管理员私聊里的好友请求/黑名单快捷操作；非匹配返回 False。"""
     if str(target_qq) not in owners():
@@ -78,6 +156,13 @@ async def handle_owner_friend_commands(bot,event,text,target_qq):
     if not raw:
         return False
     account=str(bot.self_id)
+    m_group=re.match(r'(同意|通过|批准|接受|拒绝|驳回|不同意)\s*(?:加群|入群|群邀请)\s*[#＃]?\s*(\d+)', raw)
+    if m_group:
+        approve=m_group.group(1) in ('同意','通过','批准','接受')
+        rid=int(m_group.group(2));row=access_store.get_request(rid)
+        if not row or row.get('kind')!='group':
+            await _send_owner(bot,f'没有第 {rid} 条加群请求。');return True
+        await _send_owner(bot,await _process_group_request(bot,int(target_qq),row,approve));return True
     # 删除好友通知绑定：回复“拉黑/不拉黑”即可，不需要携带 QQ。
     mid=quoted_id(event)
     if mid:
@@ -177,8 +262,21 @@ async def handle_owner_friend_commands(bot,event,text,target_qq):
 
 request=on_request(priority=2,block=False)
 @request.handle()
-async def friend_request(bot:Bot,event:FriendRequestEvent):
- access_store.request(str(bot.self_id),str(event.user_id),'friend',str(event.flag),clean(event.comment,160));await notify(bot)
+async def friend_request(bot:Bot,event):
+ if isinstance(event,FriendRequestEvent):
+  access_store.request(str(bot.self_id),str(event.user_id),'friend',str(event.flag),clean(event.comment,160));await notify(bot)
+  return
+ if isinstance(event,GroupRequestEvent):
+  account=str(bot.self_id);gid=str(event.group_id);qq=str(event.user_id)
+  if group_is_blacklisted(account,gid,qq):
+   try:
+    await bot.call_api('set_group_add_request',flag=str(event.flag),sub_type=str(event.sub_type or 'invite'),approve=False,reason='该用户已被拉黑')
+   except Exception:pass
+   await _send_inviter(bot,qq,f'你已被本群拉黑，不能邀请 bot 加入群 {gid}。')
+   return
+  meta={'gid':gid,'sub_type':str(event.sub_type or 'invite'),'inviter':qq,'comment':clean(event.comment,160)}
+  access_store.request(account,qq,'group',str(event.flag),json.dumps(meta,ensure_ascii=False),force=True)
+  await notify(bot)
 
 async def greet(bot,qq):
  account=str(bot.self_id);access_store.guest(account,str(qq))
@@ -197,7 +295,25 @@ async def greet(bot,qq):
   except Exception as e:logger.warning(f'[qq_access] 打招呼结果未确认 {type(e).__name__}')
 notice=on_notice(priority=2,block=False)
 @notice.handle()
-async def added(bot:Bot,event:FriendAddNoticeEvent):await greet(bot,str(event.user_id))
+async def added(bot:Bot,event):
+ if isinstance(event,FriendAddNoticeEvent):
+  await greet(bot,str(event.user_id))
+  return
+ if isinstance(event,GroupIncreaseNoticeEvent) and str(event.user_id)==str(bot.self_id):
+  account=str(bot.self_id);gid=str(event.group_id);row=_latest_group_row(account,gid)
+  # 管理员已同意并走 set_group_add_request 时会有 done 记录，允许正常入群。
+  if row and row.get('state')=='done':
+   return
+  # 未同意就被拉进来：立即退出，等待管理员决定。
+  try:
+   await asyncio.wait_for(bot.set_group_leave(group_id=int(gid)),10)
+  except Exception as error:
+   logger.warning(f'[qq_access] 强制入群后退出失败：{type(error).__name__}')
+  if not row or row.get('state') not in ('pending','executing'):
+   meta={'gid':gid,'sub_type':'forced','inviter':str(getattr(event,'operator_id','') or ''),'comment':'被强制拉入，已退出等待管理员同意'}
+   access_store.request(account,str(getattr(event,'operator_id','') or event.user_id),'group','',json.dumps(meta,ensure_ascii=False),force=True)
+  await notify(bot)
+  await _send_inviter(bot,str(getattr(event,'operator_id','') or event.user_id),f'bot 已被强制拉入群 {gid}，管理员尚未同意，已先退出；同意后再邀请。')
 
 admission=on_message(priority=0,block=False)
 @admission.handle()
@@ -223,6 +339,14 @@ async def private_admission(bot:Bot,event:PrivateMessageEvent,matcher:Matcher):
    rows=[r for r in access_store.pending(account) if str(r['id'])==str(binding['ref']) and qq in json.loads(r['notified'])]
    if not rows:
     matcher.stop_propagation();await matcher.finish('这条好友或聊天权限申请已经处理完或过期了，没有改动其他人的权限。')
+   if rows and all(str(r.get('kind')) == 'group' for r in rows):
+    answer=re.fullmatch(r'\s*(同意|通过|批准|接受|拒绝|驳回|不同意)\s*', clean(text,80))
+    if answer:
+     approve=answer.group(1) in ('同意','通过','批准','接受')
+     reply=await _process_group_request(bot,int(qq),rows[0],approve)
+     access_store.append_context(account,qq,{'role':'user','content':clean(text,600)})
+     access_store.append_context(account,qq,{'role':'assistant','content':reply})
+     matcher.stop_propagation();await matcher.finish(reply);return
    from src.yuna_plugins.agent_control import semantic_llm,dialog
    llm=semantic_llm()
    if not llm:return

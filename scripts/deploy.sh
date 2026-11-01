@@ -79,7 +79,7 @@ sync_code() {
   # src/admin 下没有运行时数据，可以安全替换。
   tar -czf - -C "$ROOT" \
     --exclude='__pycache__' --exclude='*.pyc' \
-    src/admin src/agent src/yuna_plugins/agent_control src/yuna_plugins/qq_access src/yuna_plugins/limit src/yuna_plugins/risk src/yuna_plugins/game_party src/qq_access.py src/qq_games.py docs scripts README.md \
+    src/admin src/agent src/yuna_plugins/agent_control src/yuna_plugins/qq_access src/yuna_plugins/limit src/yuna_plugins/risk src/yuna_plugins/game_party src/qq_access.py src/qq_games.py src/qq_join.py src/qq_appeals.py docs scripts README.md \
     | remote "set -e; cd '$REMOTE_DIR'; rm -rf src/admin/static; tar -xzf -"
 
   # 聊天插件：只覆盖 .py，保留 character.txt / json / memory / emotes / personas
