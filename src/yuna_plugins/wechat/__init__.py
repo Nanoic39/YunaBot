@@ -13,6 +13,7 @@ from src.agent.phone_play import phone_play
 from src.agent.runtime import get_phone_agent
 from src.agent.wechat import wechat_store
 from src.agent.wechat_phone import WeChatPhone
+from src.agent.wechat_vision import WeChatVision
 
 require('nonebot_plugin_apscheduler')
 from nonebot_plugin_apscheduler import scheduler
@@ -98,7 +99,17 @@ async def _poll() -> None:
             if not reply:
                 continue
             try:
-                await WeChatPhone(agent.phone).send(title, reply)
+                vision = None
+                try:
+                    import importlib
+                    chat = importlib.import_module('src.yuna_plugins.chat')
+                    vision, _ = chat._vision_client('', 'image')
+                except Exception:
+                    vision = None
+                if vision is not None and getattr(vision, 'available', False):
+                    await WeChatVision(agent.phone, vision).send(title, reply)
+                else:
+                    await WeChatPhone(agent.phone).send(title, reply)
                 _SEEN[key] = now
                 with wechat_store.db() as d:
                     d.execute('INSERT INTO messages(contact_id6,direction,text,created) VALUES(?,?,?,?)',
