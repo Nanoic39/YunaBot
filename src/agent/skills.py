@@ -16,7 +16,7 @@ class SkillStore:
 
     def _file(self, name: str) -> Path:
         safe = ''.join(ch for ch in str(name) if ch.isalnum() or ch in '-_')[:80]
-        return self.path / (safe or 'skill') + '.json'
+        return self.path / ((safe or 'skill') + '.json')
 
     def hint(self, name: str, limit: int = 3) -> str:
         try:
