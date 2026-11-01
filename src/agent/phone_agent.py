@@ -19,13 +19,14 @@ from .self_memory import self_memory as _default_self_memory
 from .visual_grid import overlay_grid, grid_to_point, is_stuck, DIRECTION_KEYS
 from .mailbox import mailbox
 from .social import social_store, SocialError
+from .skills import skill_store
 from pathlib import Path
 import hashlib
 
 _DEFAULT_PLAY = object()
 
 ACTIONS = {'tap', 'swipe', 'text', 'key', 'launch', 'open_url', 'install', 'apps', 'move',
-           'ui', 'wait', 'request_aid', 'comment_seen', 'draft_reply', 'confirm_reply', 'record_post', 'register_test_post', 'finish', 'fail'}
+           'ui', 'wait', 'share_group', 'request_aid', 'comment_seen', 'draft_reply', 'confirm_reply', 'record_post', 'register_test_post', 'finish', 'fail'}
 AID_KINDS = set(KINDS)
 
 
@@ -295,6 +296,12 @@ class PhoneAgent:
 
     def _prompt(self, task, observation):
         self_block = (task.get('self_context') or '')+'\n【共享的当前状态】\n'+self.self_memory.continuity_text()
+        try:
+            learned = skill_store.hint('phone_tasks', limit=3)
+            if learned:
+                self_block += '\n【可复用的手机操作经验】\n' + learned
+        except Exception:
+            pass
         relay_notes = str(task.get('relay_notes') or '')
         history = task['history'][-12:]
         recent_actions = [h.get('action') for h in task['history'][-4:]]
@@ -320,6 +327,7 @@ class PhoneAgent:
 - open_url: url
 - install: path（必须在 /YunaGames/Android/apks 下）
 - apps / ui / wait: 观察或等待
+- share_group: group、text；把当前看到的公开内容分享到白名单群，group 必须是管理面板里已加入白名单的群名/群号；不能分享隐私、验证码、支付信息
 - request_aid: kind=sms|phone|password|apk|registration|authorization|publish|tool|manual, title, detail；需要手机号/验证码/文件/人工时使用，执行会暂停直到 owner 回复
 - comment_seen: author, text；仅在任务指定帖子中，将界面上真实可见的评论记入去重队列
 - draft_reply: comment_id, text；创建待超管审核的回复草稿，不直接发送
@@ -463,6 +471,16 @@ class PhoneAgent:
         action = str(decision.get('action') or '')
         if action not in ACTIONS:
             raise PhoneTaskError('模型动作无效')
+        if action == 'share_group':
+            callback = getattr(self, 'share_group', None)
+            if not callable(callback):
+                raise PhoneTaskError('当前环境没有白名单群分享能力')
+            group = str(decision.get('group') or '').strip()
+            text = str(decision.get('text') or '').strip()
+            if not group or not text:
+                raise PhoneTaskError('分享群和内容不能为空')
+            await callback(group, text)
+            return {'action': action, 'result': f'已分享到白名单群 {group}'}
         if action == 'register_test_post':
             setup=task.get('social_setup')
             if setup is None:raise PhoneTaskError('本任务未获准选择评论测试目标')
@@ -877,6 +895,13 @@ class PhoneAgent:
 
     def _remember_task(self, task):
         """任务收尾时把这段真实经历写入统一自我记忆，供所有场景回忆。"""
+        if task.get('status') == 'done':
+            try:
+                steps = [f"{h.get('action')}:{str(h.get('target_text') or '')[:40]}" for h in task.get('history') or [] if h.get('action')]
+                if steps:
+                    skill_store.record('phone_tasks', str(task.get('goal') or ''), steps)
+            except Exception:
+                pass
         scene = str(task.get('environment') or 'phone')
         goal = str(task.get('goal') or '').strip()
         status = task.get('status')

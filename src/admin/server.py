@@ -774,6 +774,16 @@ def create_app(driver, root: Path = ROOT):
         loader=getattr(plugin.module,'agent_chat_memory',None) if plugin else None
         return loader(goal) if callable(loader) else ''
     phone_agent.chat_memory_loader=agent_memory_loader
+    async def _share_to_whitelist_group(group: str, text: str):
+        from src.agent.phone_agent import PhoneTaskError
+        from src.agent.wechat_phone import WeChatPhone
+        row = next((g for g in wechat_store.list_groups(True)
+                    if group in (g.get('name'), g.get('id6'), g.get('wxid'))), None)
+        if not row:
+            raise PhoneTaskError('目标群不在微信白名单')
+        if not await WeChatPhone(phone_client).send(row.get('name') or '', text):
+            raise PhoneTaskError('微信群分享未完成')
+    phone_agent.share_group = _share_to_whitelist_group
     set_phone_agent(phone_agent)
     from src.agent.minecraft import MinecraftAgent, MinecraftClient, set_minecraft_agent
     game_llm=AgentLLM(phone_agent.llm.base,phone_agent.llm.key,phone_agent.llm.model,
