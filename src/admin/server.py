@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 import time
 from datetime import datetime
 from collections import deque
@@ -45,6 +46,7 @@ from src.agent.llm import AgentLLM
 from src.agent.aid import AidError, aid_store
 from src.agent.nodes import NodeQueue
 from src.agent.payments import Payments, is_payment
+from src.agent.phone_payment import PhonePayments
 from src.qq_games import GameStore, send_game_reminder, game_phase, phase_name
 
 from .alerts import AlertManager
@@ -756,6 +758,7 @@ def create_app(driver, root: Path = ROOT):
             str(getattr(driver.config, 'agent_computer_token', '') or '') or None,
         )
         real_phone = False
+    agent_control.live_payment_enabled = real_phone
     def yuna_persona_loader():
         """给电脑/手机 Agent 注入 Yuna 的人设，操作设备的也是她本人。"""
         path = CHAT_DIR / 'character.txt'
@@ -795,26 +798,23 @@ def create_app(driver, root: Path = ROOT):
         except Exception:
             pass
 
-    async def _record_payment_handoff(task, handoff):
-        row = handoff_store.create(task.get('id') or '', handoff.get('merchant'), handoff.get('order_id'),
-                                   handoff.get('amount_minor'), handoff.get('purpose'))
-        try:
-            from nonebot import get_bots
-            text = (f"【支付宝支付待确认】\n商户：{row.get('merchant') or '未知'}\n"
-                    f"金额：¥{(int(row.get('amount_minor') or 0) / 100):.2f}\n"
-                    f"用途：{row.get('purpose') or ''}\n"
-                    "请在手机上手动输入支付密码完成；我不会输入密码。完成后回复「支付完成」，或告诉管理员取消。")
-            for bot in get_bots().values():
-                for owner in getattr(driver.config, 'superusers', set()):
-                    try:
-                        await bot.send_private_msg(user_id=int(owner), message=text)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        return row
-    phone_agent.payment_handoff_callback = _record_payment_handoff
     phone_agent.aid_notify = _notify_phone_aid
+    if real_phone:
+        phone_payments = PhonePayments(agent_control, payments, handoff_store)
+        async def _authorize_phone_payment(task, handoff, ui):
+            row = handoff_store.create(task['id'], handoff['merchant'], handoff['order_id'],
+                                       handoff['amount_minor'], handoff['purpose'])
+            task['payment_handoff']['id'] = row['id']
+            handoff_store.status(row['id'], 'checking_authorization', '只记录订单资料；未输入密码、未确认扣款')
+            return await phone_payments.authorize(task, task['payment_handoff'], ui)
+        phone_agent.payment_authorizer = _authorize_phone_payment
+        phone_agent.payment_begin = phone_payments.begin
+        phone_agent.payment_verifier = phone_payments.verify
+        phone_agent.payment_finalizer = phone_payments.finish
+        phone_agent.payment_scope_loader = lambda: [
+            {k: g[k] for k in ('merchant', 'recipient', 'purpose', 'single_minor', 'daily_minor', 'monthly_minor')}
+            for g in agent_control.snapshot()['grants'] if g['enabled'] and g['mode'] == 'live'
+            and g['capability'] in ('payment.pay', 'payment.recharge') and g['expires_at'] > time.time()]
     async def _share_to_whitelist_group(group: str, text: str):
         from src.agent.phone_agent import PhoneTaskError
         from src.agent.wechat_phone import WeChatPhone
@@ -1280,7 +1280,7 @@ def create_app(driver, root: Path = ROOT):
             origin = request.headers.get('origin')
             if origin and urlsplit(origin).netloc != request.headers.get('host'):
                 return Response('不允许跨站请求', status_code=403)
-            if request.headers.get('x-yuna-admin') != '1':
+            if request.url.path != '/api/phone/adb' and request.headers.get('x-yuna-admin') != '1':
                 return Response('缺少管理请求标识', status_code=403)
         response = await call_next(request)
         path = request.url.path
@@ -2153,6 +2153,57 @@ def create_app(driver, root: Path = ROOT):
         audit(request, '取消一次性协助', aid)
         return {'ok': True}
 
+    @app.post('/api/phone/adb')
+    async def phone_adb_push(request: Request):
+        """手机端网络变化后上报 Tailscale IP 与候选监听端口，服务器自动尝试并更新桥。"""
+        supplied = str(request.headers.get('X-Phone-Token') or '')
+        expected = str(getattr(phone_client, 'token', '') or '')
+        if not expected or not hmac.compare_digest(supplied, expected):
+            raise HTTPException(401, 'unauthorized')
+        body = await request.json()
+        ip = str(body.get('ip') or '').strip()
+        if not re.fullmatch(r'[0-9a-fA-F:.]+', ip) or ':' in ip and ip.count(':') < 2 and not re.fullmatch(r'(?:\d{1,3}\.){3}\d{1,3}', ip):
+            raise HTTPException(400, 'ip 无效')
+        ports = []
+        for value in (body.get('ports') or [])[:100]:
+            try:
+                port = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 1024 <= port <= 65535 and port not in ports:
+                ports.append(port)
+        if not ports:
+            raise HTTPException(400, 'ports 无效')
+
+        def _try():
+            checks = '; '.join(
+                f"adb connect {ip}:{p} >/dev/null 2>&1; [ \"$(adb -s {ip}:{p} get-state 2>/dev/null)\" = device ] && echo OK:{p}"
+                for p in ports)
+            command = (checks + '; true')
+            result = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4',
+                                     'root@103.39.66.143', command],
+                                    capture_output=True, text=True, timeout=35)
+            found = next((line.split(':', 1)[1] for line in result.stdout.splitlines()
+                          if line.startswith('OK:')), '')
+            if not found:
+                return None
+            serial = f'{ip}:{found}'
+            update = (f"sed -i 's#^ANDROID_SERIAL=.*#ANDROID_SERIAL={serial}#' "
+                      "/YunaGames/Android/bridge/phone.env && systemctl restart yuna-phone-bridge")
+            subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4',
+                            'root@103.39.66.143', update], capture_output=True, text=True, timeout=20)
+            return serial
+
+        serial = await run_in_threadpool(_try)
+        if not serial:
+            raise HTTPException(404, '没有可连接的 ADB 端口')
+        try:
+            from src.agent.phone_ports import record_adb_serial
+            record_adb_serial(serial)
+        except Exception:
+            pass
+        return {'ok': True, 'serial': serial, 'ip': ip}
+
     @app.get('/api/agent/phone', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def agent_phone():
         try:
@@ -2264,7 +2315,8 @@ def create_app(driver, root: Path = ROOT):
             result = await phone_agent.start(str(body.get('goal') or ''),
                 body.get('max_steps'), social_post_id=body.get('social_post_id'),
                 no_owner_contact=body.get('no_owner_contact',False),publish_authorization=authorization,
-                payment_test=bool(body.get('payment_test')))
+                payment_test=bool(body.get('payment_test')),
+                payment_amount_minor=int(body.get('payment_amount_minor') or 100))
         except (PhoneTaskError,PhonePlayError) as error:
             if created_session and (phone_play.snapshot().get('session') or {}).get('id')==created_session:phone_play.end('task_start_failed')
             raise HTTPException(409, str(error)) from error
@@ -2418,11 +2470,21 @@ def create_app(driver, root: Path = ROOT):
     async def agent_payments():
         data = await run_in_threadpool(agent_control.snapshot)
         with agent_control._db() as db:
-            real_usage = agent_control._usage(db, 'live')
+            budget_usage = agent_control._usage(db, 'live')
+        real_usage = await run_in_threadpool(payments.confirmed_usage)
+        credential = {'configured': False, 'available': False}
+        if real_phone:
+            try:
+                status = await asyncio.wait_for(phone_client.action({'action': 'payment_credential_status'}), 10)
+                credential = {'configured': bool(status.get('configured')), 'available': True, 'storage': 'phone_local'}
+            except Exception:
+                credential['error'] = '手机凭据状态暂时无法读取'
         phone_ops = [t for t in phone_agent.list_tasks() if any(
             word in str(t.get('goal') or '') for word in ('支付', '购物', '购买', '充值', '下单', '付款', '支付宝'))][:30]
         return {'policy': data['policy'], 'usage': data['usage'], 'live_usage': real_usage,
-                'live_available': False, 'records': await run_in_threadpool(payments.history),
+                'live_available': real_phone, 'payment_channel': 'phone_alipay' if real_phone else 'simulation',
+                'live_budget_usage': budget_usage, 'credential': credential,
+                'accounting': 'verified_receipts', 'records': await run_in_threadpool(payments.history),
                 'phone_operations': phone_ops,
                 'payment_handoffs': handoff_store.list(100),
                 'grants': [g for g in data['grants'] if is_payment(g)],
@@ -2432,14 +2494,40 @@ def create_app(driver, root: Path = ROOT):
     @app.get('/api/agent/payment-handoffs', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def payment_handoffs():
         handoff_store.expire_stale(35)
-        return {'items': handoff_store.list(100)}
+        return {'items': handoff_store.list(100), 'receipts': handoff_store.receipts(100)}
+
+    @app.post('/api/agent/payment-handoffs/{rid}/receipt', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def payment_handoff_receipt(rid: int, body: dict, request: Request):
+        evidence = str(body.get('evidence') or '').strip()
+        if not evidence:
+            raise HTTPException(400, '补账必须提供真实回执说明')
+        row = next((h for h in handoff_store.list(100) if int(h['id']) == int(rid)), None)
+        if not row:
+            raise HTTPException(404, '支付交接不存在')
+        if body.get('amount_minor') is not None and int(body['amount_minor']) != int(row['amount_minor']):
+            raise HTTPException(400, '回执金额与交接金额不一致')
+        handoff_store.status(rid, 'completed', evidence[:500])
+        audit(request, '支付宝回执补账', f'{rid} {evidence[:80]}')
+        return {'ok': True, 'id': rid, 'amount_minor': row['amount_minor']}
 
     @app.post('/api/agent/payment-handoffs/{rid}/status', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def payment_handoff_status(rid: int, body: dict, request: Request):
+        if body.get('status') not in ('cancelled', 'unknown'):
+            raise HTTPException(400, '实付成功必须核对真实回执；请使用回执补账，不能仅标记完成')
         if not handoff_store.status(rid, str(body.get('status') or 'updated'), str(body.get('note') or '')):
             raise HTTPException(404, '支付交接不存在')
         audit(request, '更新支付交接状态', str(rid))
         return {'ok': True}
+
+    @app.post('/api/agent/payments/reconcile', dependencies=[Depends(authenticated), Depends(agent_owner)])
+    async def reconcile_payment(body: dict, request: Request):
+        allowed = {'source_task', 'merchant', 'purpose', 'order_id', 'transaction_id', 'amount_minor', 'paid_at', 'evidence'}
+        if set(body) != allowed:
+            raise HTTPException(400, '补账字段不完整或包含未知字段')
+        owner_name = actor(request)[0]
+        result = await run_in_threadpool(agent_call, lambda: payments.reconcile_verified(**body, actor=owner_name))
+        audit(request, '核验支付回执并补账', result['payment_id'])
+        return {'ok': True, **result}
 
     @app.get('/api/agent/payments/records/{payment_id}', dependencies=[Depends(authenticated), Depends(agent_owner)])
     async def agent_payment_detail(payment_id: str):

@@ -20,6 +20,9 @@ class PaymentHandoffStore:
                 id INTEGER PRIMARY KEY, task_id TEXT, merchant TEXT, order_id TEXT,
                 amount_minor INTEGER, purpose TEXT, status TEXT DEFAULT 'awaiting_password',
                 created REAL, updated REAL, note TEXT DEFAULT '')''')
+            d.executescript('''CREATE TABLE IF NOT EXISTS receipts(
+                id INTEGER PRIMARY KEY, handoff_id INTEGER UNIQUE, amount_minor INTEGER, merchant TEXT,
+                status TEXT DEFAULT 'recorded', created REAL, note TEXT DEFAULT '')''')
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -58,9 +61,21 @@ class PaymentHandoffStore:
 
     def status(self, rid, status, note=''):
         with self.db() as d:
+            row = d.execute('SELECT * FROM handoffs WHERE id=?', (int(rid),)).fetchone()
+            if not row:
+                return False
             d.execute('UPDATE handoffs SET status=?,note=?,updated=? WHERE id=?',
                       (str(status), str(note or '')[:500], self.clock(), int(rid)))
-            return bool(d.total_changes)
+            if str(status) == 'completed':
+                d.execute('INSERT OR IGNORE INTO receipts(handoff_id,amount_minor,merchant,status,created,note) '
+                          'VALUES(?,?,?,?,?,?)',
+                          (int(rid), int(row['amount_minor'] or 0), str(row['merchant'] or ''),
+                           'recorded', self.clock(), str(note or 'owner-confirmed')))
+            return True
+
+    def receipts(self, limit=100):
+        with self.db() as d:
+            return [dict(r) for r in d.execute('SELECT * FROM receipts ORDER BY id DESC LIMIT ?', (int(limit),))]
 
 
 handoff_store = PaymentHandoffStore()

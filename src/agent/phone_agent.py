@@ -20,13 +20,15 @@ from .visual_grid import overlay_grid, grid_to_point, is_stuck, DIRECTION_KEYS
 from .mailbox import mailbox
 from .social import social_store, SocialError
 from .skills import skill_store
+from .experience import experience_store
+from .control import ControlError
 from pathlib import Path
 import hashlib
 
 _DEFAULT_PLAY = object()
 
 ACTIONS = {'tap', 'swipe', 'text', 'key', 'launch', 'open_url', 'install', 'apps', 'move',
-           'ui', 'wait', 'share_group', 'request_aid', 'comment_seen', 'draft_reply', 'confirm_reply', 'record_post', 'register_test_post', 'finish', 'fail'}
+           'ui', 'wait', 'share_group', 'request_aid', 'payment_receipt', 'comment_seen', 'draft_reply', 'confirm_reply', 'record_post', 'register_test_post', 'finish', 'fail'}
 AID_KINDS = set(KINDS)
 
 
@@ -148,6 +150,8 @@ class PhoneAgent:
             'aid_answers': {str(k): str(v)[:500] for k, v in (task.get('aid_answers') or {}).items()},
             'payment_handoff': dict(task.get('payment_handoff') or {}),
             'payment_test_authorized': bool(task.get('payment_test_authorized')),
+            'payment_control_id': task.get('payment_control_id'),
+            'payment_attempted': bool(task.get('payment_attempted')),
         }
 
     def list_tasks(self):
@@ -159,7 +163,7 @@ class PhoneAgent:
             raise PhoneTaskError('手机任务不存在')
         return self._public(task)
 
-    async def start(self, goal, max_steps=None, social_post_id=None, social_reply_id=None, social_setup=None, resume_task_id=None, payment_test=False):
+    async def start(self, goal, max_steps=None, social_post_id=None, social_reply_id=None, social_setup=None, resume_task_id=None, payment_test=False, payment_amount_minor=100):
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 2000:
             raise PhoneTaskError('目标无效')
         if self._active:
@@ -191,7 +195,8 @@ class PhoneAgent:
                 'started': time.time(), 'finished': None, 'summary': '', 'error': '',
                 'waiting_for_aid': '', 'steps_limit': steps,
                 'history': [], 'screenshot': b'', 'ui': '', 'cancel': asyncio.Event(),
-                'notified': False, 'future': None, 'payment_test_authorized': bool(payment_test)}
+                'notified': False, 'future': None, 'payment_test_authorized': bool(payment_test),
+                'payment_amount_minor': max(1, int(payment_amount_minor or 100))}
         self.tasks[tid] = task
         self._active = tid
         if self.play is not None:
@@ -217,16 +222,15 @@ class PhoneAgent:
             task['resumed_from']=resume_task_id
             task['aid_answers']={str(k):str(v)[:500] for k,v in (source.get('aid_answers') or {}).items()
                                  if str(k).startswith('manual|')}
-        if payment_test or ('1 元' in goal and ('充值' in goal or 'DeepSeek' in goal or '支付能力' in goal)):
+        if payment_test:
             payment_test = True
             # 每次新的 1 元测试都允许重新发起一次支付密码请求；旧测试的“已请求”不能阻塞新订单。
-            task['password_requested'] = False
             task['password_requested'] = False
             task.setdefault('payment_test_authorized', True)
             task['owner_guidance'] = (
                 (str(task.get('owner_guidance') or '').strip() + '\n')
                 + '这是一次新的 1 元支付测试；历史任务里的密码请求、失败和未回复都不适用于本次。'
-                + '到达支付宝密码页必须调用 request_aid kind=password，不要直接 fail。'
+                + '到达支付宝密码页调用 request_aid kind=password，执行器会使用手机本地凭据并核对额度，不会重复向 owner 索取密码。'
             )[:1000]
         task['self_context'] = self._self_context()
         # 跨场景捎话：把群聊/面板托付给「服务器」的消息带给这次任务
@@ -327,10 +331,20 @@ class PhoneAgent:
 
     def _prompt(self, task, observation):
         self_block = (task.get('self_context') or '')+'\n【共享的当前状态】\n'+self.self_memory.continuity_text()
+        payment_scopes = []
+        scope_loader = getattr(self, 'payment_scope_loader', None)
+        if callable(scope_loader):
+            try:
+                payment_scopes = scope_loader()
+            except Exception:
+                pass
         try:
-            learned = skill_store.hint('phone_tasks', limit=3)
+            learned = skill_store.hint('phone_tasks', limit=3, query=str(task.get('goal') or ''))
             if learned:
                 self_block += '\n【可复用的手机操作经验】\n' + learned
+            feedback = experience_store.context(str(task.get('goal') or ''), str(task.get('environment') or 'phone'))
+            if feedback:
+                self_block += '\n' + feedback
         except Exception:
             pass
         relay_notes = str(task.get('relay_notes') or '')
@@ -359,7 +373,9 @@ class PhoneAgent:
 - install: path（必须在 /YunaGames/Android/apks 下）
 - apps / ui / wait: 观察或等待
 - share_group: group、text；把当前看到的公开内容分享到白名单群，group 必须是管理面板里已加入白名单的群名/群号；不能分享隐私、验证码、支付信息
-- 购物/充值支付：在购物或充值应用内创建订单，选择支付宝；如果当前任务获得了一次性支付测试授权，可以点击“去支付/提交订单/立即支付”进入支付宝确认页。到支付宝密码输入页时必须停下，调用 request_aid，kind=password，title="支付宝支付密码"，detail 写清商户、订单号、金额和用途，并额外带 payment=true、amount_minor、merchant、purpose。owner 会在 QQ 里回复密码，执行器会直接填入密码输入框；owner 回复就是本次操作授权。只有金额不超过 1 元的一次性测试才允许随后点击“确认付款/确认支付”，且只能点一次；不得重复支付、不得修改金额、不得绕过验证。
+- 购物/充值支付：可准备订单并进入支付宝。先读取并保留真实订单号；到支付密码页调用 request_aid kind=password，payment=true，merchant=页面真实收款方，order_id=真实订单号，amount_minor=实际分金额，purpose=获授权用途。执行器独立检查支付白名单、单笔/当日/当月额度后，在手机本地输入已保存密码；不要向 owner 索要密码、不要自己输入数字、不要绕过验证码。超限才等待对应维度审批。输入密码可能立即扣款，绝不能重试；打开成功页/订单详情，核对商户、金额、订单号、支付宝交易号，再调用 payment_receipt。凭据缺失时说明需在手机本地配置，不要不断询问密码。
+- payment_receipt: 从当前支付宝成功页核验并入账，尚无订单/交易号时继续打开订单详情；模型汇报完成不代表付款成功。
+- 当前有效支付白名单（收款方、用途需精确匹配；不代表可以超限或重复扣款）：{json.dumps(payment_scopes, ensure_ascii=False)}
 - request_aid: kind=sms|phone|password|apk|registration|authorization|publish|tool|manual, title, detail；需要手机号/验证码/文件/人工时使用，执行会暂停直到 owner 回复
 - comment_seen: author, text；仅在任务指定帖子中，将界面上真实可见的评论记入去重队列
 - draft_reply: comment_id, text；创建待超管审核的回复草稿，不直接发送
@@ -430,6 +446,12 @@ class PhoneAgent:
             except Exception:
                 pass
         task['raw_ui'] = ui  # 仅执行器核对，不进入提示词、公开任务或持久历史。
+        verifier = getattr(self, 'payment_verifier', None)
+        if callable(verifier) and task.get('payment_attempted') and task.get('payment_handoff', {}).get('status') != 'paid':
+            try:
+                verifier(task, ui)
+            except ControlError:
+                pass
         task['screen_size'] = health.get('size', '')
         try:
             for node in ET.fromstring(ui).iter('node'):
@@ -518,10 +540,71 @@ class PhoneAgent:
                     raise PhoneTaskError('尚未选择关联社区，未尝试发布。先点击添加社区，选择与当前文章相关的社区，确认表单完整后再送审发布；无需向超管询问普通表单操作')
         return [n.get('text','') for n in tree.iter('node') if 'EditText' in n.get('class','') and n.get('text')]
 
+    async def _local_payment(self, task, decision):
+        if task.get('payment_attempted'):
+            raise PhoneTaskStopped('本订单已经尝试付款；请核对交易记录，禁止再次输入密码')
+        authorize = getattr(self, 'payment_authorizer', None)
+        begin = getattr(self, 'payment_begin', None)
+        if not callable(authorize) or not callable(begin):
+            raise PhoneTaskStopped('当前执行环境没有启用真实手机支付控制器')
+        try:
+            amount = decision.get('amount_minor')
+            if type(amount) is not int or amount <= 0:
+                raise PhoneTaskError('支付金额必须为从真实界面读取的正整数分')
+            handoff = {'merchant': str(decision.get('merchant') or '')[:120],
+                       'purpose': str(decision.get('purpose') or '')[:160],
+                       'amount_minor': amount, 'order_id': str(decision.get('order_id') or '')[:160],
+                       'status': 'checking', 'created': time.time()}
+            status = await self.phone.action({'action': 'payment_credential_status'})
+            if not status.get('configured'):
+                raise PhoneTaskStopped('手机本地尚未配置支付宝支付凭据；已停止，未索要密码或尝试扣款')
+            task['payment_handoff'] = handoff
+            await authorize(task, handoff, task.get('raw_ui') or task.get('ui') or '')
+            # Approval may have taken time: observe the actual page again, and
+            # validate current merchant/amount before claiming a one-shot debit.
+            current = str((await self.phone.action({'action': 'ui'})).get('output') or '')
+            from .phone_payment import verify_checkout
+            verify_checkout(current, handoff['merchant'], amount)
+            if task['cancel'].is_set() or (self.play is not None and not self.play.can_operate()):
+                raise PhoneTaskStopped('付款执行前任务或设备操作授权已结束，未输入密码')
+            begin(task, handoff)
+            task['payment_attempted'] = True
+            handoff['status'] = 'attempted'
+            self._save()  # crash after this point must never resend a payment
+            await self.phone.action({'action': 'payment_local_input', 'order_id': handoff['order_id'],
+                                     'merchant': handoff['merchant'], 'amount_minor': amount})
+            task['has_secret_input'] = True
+            task.setdefault('secret_inputs', {})['password'] = ('phone-local-alipay',)
+            return {'action': 'request_aid', 'result': '已按白名单与额度授权在手机本地完成一次密码输入；尚未确认扣款结果，不得再次输入。请打开成功页/订单详情核对原订单、金额和交易号'}
+        except ControlError as error:
+            raise PhoneTaskStopped(str(error)) from error
+
     async def _execute(self, task, decision):
         action = str(decision.get('action') or '')
         if action not in ACTIONS:
             raise PhoneTaskError('模型动作无效')
+        payment_ui = task.get('raw_ui') or task.get('ui') or ''
+        if 'com.eg.android.AlipayGphone' in payment_ui and re.search(r'支付密码|付款密码|请输入密码', payment_ui):
+            if action in ('text', 'key', 'move', 'swipe'):
+                raise PhoneTaskStopped('支付密码页只允许使用手机本地凭据执行器，禁止模型直接输入')
+            if action == 'tap':
+                label = str(decision.get('target_text') or '')
+                allowed_labels = {'取消', '返回', '关闭'}
+                if task.get('payment_attempted'):
+                    allowed_labels.update({'确认付款', '确认支付', '立即付款'})
+                if label not in allowed_labels:
+                    raise PhoneTaskError('请使用 request_aid kind=password 交由本地支付执行器核对额度与凭据')
+        if action == 'payment_receipt':
+            verifier = getattr(self, 'payment_verifier', None)
+            if not callable(verifier):
+                raise PhoneTaskError('当前没有手机支付回执核验器')
+            try:
+                result = verifier(task, task.get('raw_ui') or task.get('ui') or '')
+            except ControlError as error:
+                raise PhoneTaskError(str(error)) from error
+            if not result:
+                raise PhoneTaskError('本任务没有实际付款尝试，不能登记实付')
+            return {'action': action, 'result': '原订单、收款方、金额和交易号已核验，已入真实支付账本'}
         if action == 'share_group':
             callback = getattr(self, 'share_group', None)
             if not callable(callback):
@@ -588,8 +671,10 @@ class PhoneAgent:
             social_store.verified(rid, texts, evidence, post['external_id'])
             return {'action':action, 'result':'同帖账号与已发回复核验通过'}
         if action == 'request_aid':
-            if task.get('no_owner_contact'):raise PhoneTaskStopped('本任务禁止询问超管；无法自行取得所需信息，已停止且未发送协助消息')
             kind = str(decision.get('kind') or '')
+            if (kind == 'password' or (kind == 'manual' and decision.get('payment') is True)) and ('com.eg.android.AlipayGphone' in (task.get('raw_ui') or task.get('ui') or '') or decision.get('payment') is True):
+                return await self._local_payment(task, decision)
+            if task.get('no_owner_contact'):raise PhoneTaskStopped('本任务禁止询问超管；无法自行取得所需信息，已停止且未发送协助消息')
             if kind not in AID_KINDS:
                 raise PhoneTaskError('协助类型无效')
             if kind == 'password' and task.get('password_requested') and not task.get('payment_test_authorized'):
@@ -598,25 +683,6 @@ class PhoneAgent:
                 task['password_requested'] = True
             title = str(decision.get('title') or '手机操作需要协助')[:120]
             detail = str(decision.get('detail') or '')[:500]
-            if kind in ('manual', 'password') and (decision.get('payment') is True or decision.get('amount_minor') is not None or task.get('payment_test_authorized')):
-                try:
-                    amount = int(decision.get('amount_minor') or 0)
-                except (TypeError, ValueError):
-                    amount = 0
-                task['payment_handoff'] = {
-                    'merchant': str(decision.get('merchant') or 'DeepSeek')[:120],
-                    'purpose': str(decision.get('purpose') or '充值1元测试')[:300],
-                    'amount_minor': max(1, amount or 100),
-                    'order_id': str(decision.get('order_id') or '')[:160],
-                    'status': 'awaiting_user_password',
-                    'created': time.time(),
-                }
-                callback = getattr(self, 'payment_handoff_callback', None)
-                if callable(callback):
-                    try:
-                        await callback(task, task['payment_handoff'])
-                    except Exception as error:
-                        raise PhoneTaskError('支付交接记录失败：' + type(error).__name__) from error
             def _norm_title(text_value):
                 return re.sub(r'[\s①②③④⑤⑥⑦⑧⑨⑩,，。.、:：;；?？!！]', '', str(text_value or ''))
             answered = task.setdefault('aid_answers', {})
@@ -628,6 +694,20 @@ class PhoneAgent:
             if prior is not None and kind != 'manual':
                 return {'action': 'request_aid', 'result': f'owner 之前已经提供过：{prior}。直接使用这份内容继续操作，不要再向 owner 重复索要'}
             secret_target=None
+            if kind == 'password' and task.get('payment_test_authorized'):
+                configured = False
+                try:
+                    health = await self.phone.health()
+                    configured = bool(health.get('alipay_secret_configured'))
+                    if configured:
+                        await self.phone.action({'action': 'alipay_password'})
+                        task['has_secret_input'] = True
+                        task.setdefault('secret_inputs', {})['password'] = ('local-alipay', 'keypad', 'alipay', 'keypad')
+                        return {'action': 'request_aid', 'result': '已使用手机本地支付宝凭证输入密码；服务器未接收密码'}
+                except Exception:
+                    configured = False
+                if not configured:
+                    raise PhoneTaskError('手机本地支付宝凭证未配置；请在手机本地设置后重试，不通过QQ索取密码')
             keypad = self._alipay_keypad(task.get('raw_ui') or task.get('ui') or '') if kind == 'password' and task.get('payment_test_authorized') else {}
             if keypad:
                 task['_alipay_keypad'] = keypad
@@ -807,18 +887,26 @@ class PhoneAgent:
             if re.search(r'支付|付款|下单|确认购买|确认充值', label):
                 handoff = task.get('payment_handoff') or {}
                 try:
-                    amount_ok = int(handoff.get('amount_minor') or 0) <= 100
+                    amount_ok = int(handoff.get('amount_minor') or 0) <= int(task.get('payment_amount_minor') or 100)
                 except (TypeError, ValueError):
                     amount_ok = False
-                allowed_final = (bool(task.get('payment_test_authorized')) and amount_ok
+                allowed_final = (bool(task.get('payment_attempted')) and not task.get('payment_confirm_tapped')
                                  and bool(task.get('secret_inputs', {}).get('password'))
                                  and label in {'确认付款', '确认支付', '立即付款'})
-                allowed_method = bool(task.get('payment_test_authorized')) and label in {'支付宝', '支付宝支付'}
-                allowed_open = bool(task.get('payment_test_authorized')) and label in {
+                allowed_method = callable(getattr(self, 'payment_authorizer', None)) and label in {'支付宝', '支付宝支付'}
+                allowed_open = callable(getattr(self, 'payment_authorizer', None)) and label in {
                     '去支付', '提交订单', '立即支付', '去付款'
                 } and not re.search(r'确认|密码|立即付款|确认付款', label)
                 if not (allowed_method or allowed_open or allowed_final):
-                    task['cancel'].set(); raise PhoneTaskError('真实支付尚未接入，手机动作不能扣款')
+                    task['cancel'].set(); raise PhoneTaskError('当前操作未通过独立资金授权，禁止扣款')
+                if allowed_final:
+                    from .phone_payment import verify_checkout
+                    try:
+                        verify_checkout(task.get('raw_ui') or task.get('ui') or '', handoff['merchant'], int(handoff['amount_minor']))
+                    except ControlError as error:
+                        raise PhoneTaskStopped(str(error)) from error
+                    task['payment_confirm_tapped'] = True
+                    self._save()
             if re.fullmatch(r'(发布|发表|发帖|立即发布|确认发布)', label):
                 if task.get('post_submit_attempted'):
                     task['cancel'].set();raise PhoneTaskError('已经提交过发帖，不重复点击；请核验发布结果')
@@ -1020,7 +1108,8 @@ class PhoneAgent:
 
     def _remember_task(self, task):
         """任务收尾时把这段真实经历写入统一自我记忆，供所有场景回忆。"""
-        if task.get('status') == 'done':
+        experience_store.record(task)
+        if task.get('status') == 'done' and task.get('verification') in ('platform_verified', 'excerpt_verified'):
             try:
                 steps = [f"{h.get('action')}:{str(h.get('target_text') or '')[:40]}" for h in task.get('history') or [] if h.get('action')]
                 if steps:
@@ -1088,7 +1177,8 @@ class PhoneAgent:
                 return False
             x, y = min(edits, key=lambda p: p[1])
             await self.phone.action({'action': 'tap', 'x': x, 'y': y})
-            await self.phone.action({'action': 'text', 'text': '1'})
+            amount = max(1, int(task.get('payment_amount_minor') or 100))
+            await self.phone.action({'action': 'text', 'text': str(amount // 100)})
             task['payment_amount_filled'] = True
             return True
         except Exception:
@@ -1129,6 +1219,10 @@ class PhoneAgent:
                     return
                 action = str(decision.get('action') or '')
                 if action == 'finish':
+                    if task.get('stuck_count') and not self._completion_verified(task):
+                        raise PhoneTaskError('连续重复操作后尚未观察到有效进展，不能直接汇报完成；应换策略或说明受阻')
+                    if task.get('payment_attempted') and task.get('payment_handoff', {}).get('status') != 'paid':
+                        raise PhoneTaskError('已经尝试付款但未取得订单匹配的成功回执，不能标记支付完成；需核对原订单')
                     if task.get('social_setup') is not None and not task.get('setup_registered'):
                         raise PhoneTaskError('测试目标尚未从真实界面登记，不能标记完成')
                     if task.get('post_submit_attempted') and not task.get('post_recorded'):
@@ -1221,6 +1315,12 @@ class PhoneAgent:
             task['status'] = 'failed'
             task['error'] = type(error).__name__ + '：' + str(error)[:400]
         finally:
+            finalizer = getattr(self, 'payment_finalizer', None)
+            if callable(finalizer):
+                try:
+                    finalizer(task)
+                except Exception:
+                    pass
             if task['status']!='done':
                 submitted=task.get('post_submit_attempted') or task.get('reply_submit_attempted')
                 verified=self._completion_verified(task)
@@ -1252,7 +1352,7 @@ class PhoneAgent:
                 else:
                     self.play.set_resume(task['goal'])
             # 游玩经验：任务做完后把「哪些操作在这个界面有效」沉淀成经验事实
-            if task['status'] == 'done' and task.get('history'):
+            if task['status'] == 'done' and task.get('verification') in ('platform_verified', 'excerpt_verified') and task.get('history'):
                 try:
                     effective = [h for h in task['history'][-12:] if '失败' not in str(h.get('result') or '')]
                     if len(effective) >= 2:

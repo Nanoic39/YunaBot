@@ -1,6 +1,7 @@
 """受限的 Android 手机控制桥；仅监听 127.0.0.1，不提供任意 shell。"""
 from __future__ import annotations
-import base64, json, os, re, secrets, subprocess, time, shlex
+import base64, json, os, re, secrets, subprocess, time, shlex, hashlib
+from decimal import Decimal
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -17,6 +18,73 @@ ENV = {**os.environ, "HOME": ROOT + "/home", "ANDROID_HOME": ROOT + "/sdk",
        "ANDROID_AVD_HOME": ROOT + "/avd", "TMPDIR": ROOT + "/tmp",
        "PATH": ROOT + "/sdk/platform-tools:" + os.environ.get("PATH", "")}
 ENV["ANDROID_SERIAL"] = SERIAL
+PAYMENT_HOME = '/data/data/com.termux/files/home/.local/share/yuna-phone'
+PAYMENT_SECRET = PAYMENT_HOME + '/secrets/alipay-password'
+
+
+def credential_configured():
+    # Executed inside the handset. Never return file contents to the bridge.
+    check = ('[ -f ' + shlex.quote(PAYMENT_SECRET) + ' ] && [ ! -L ' + shlex.quote(PAYMENT_SECRET)
+             + ' ] && [ "$(stat -c %a ' + shlex.quote(PAYMENT_SECRET) + ')" = 600 ]'
+             + ' && [ "$(wc -c < ' + shlex.quote(PAYMENT_SECRET) + ')" -eq 6 ]')
+    try:
+        out = shell('sh', '-c', 'run-as com.termux sh -c ' + shlex.quote(check) + ' >/dev/null 2>&1 && echo configured || echo missing')
+        return out.decode().strip() == 'configured'
+    except Exception:
+        return False
+
+
+def local_payment_input(body):
+    """Validate the actual screen, claim the order locally, type without export.
+
+    This action has no automatic ADB retry. Even a timeout consumes its order
+    marker because the final digit may already have caused a debit.
+    """
+    merchant, order = str(body.get('merchant') or ''), str(body.get('order_id') or '')
+    amount = intval(body.get('amount_minor'), 'amount_minor', 1, 100_000_000)
+    if not 1 <= len(merchant) <= 120 or not re.fullmatch(r'[A-Za-z0-9_-]{6,160}', order):
+        raise ValueError('支付订单或商户无效')
+    if not credential_configured():
+        raise ValueError('手机本地支付凭据未配置或权限不正确')
+    shell('uiautomator', 'dump', '/sdcard/yuna-payment.xml', timeout=45)
+    ui = shell('cat', '/sdcard/yuna-payment.xml').decode('utf-8', 'replace')
+    tree = ET.fromstring(ui)
+    nodes = list(tree.iter('node'))
+    text = '\n'.join(n.get('text') or n.get('content-desc') or '' for n in nodes)
+    if not any(n.get('package') == 'com.eg.android.AlipayGphone' for n in nodes):
+        raise ValueError('前台不是支付宝')
+    monies = re.findall(r'(?:[¥￥]\s*|(?:支付金额|付款金额|实付金额|实付款)\s*[:：]?\s*)(\d{1,8}(?:\.\d{1,2})?)|(?<![\d.])(\d{1,8}\.\d{2})\s*元', text)
+    values = {int(Decimal(a or b) * 100) for a, b in monies}
+    if merchant not in text or values != {amount} or not re.search(r'支付密码|付款密码|请输入密码', text):
+        raise ValueError('收款方、金额或密码页已变化，未输入密码')
+    coords = {}
+    for n in nodes:
+        digit = (n.get('text') or n.get('content-desc') or '').strip()
+        bounds = re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', n.get('bounds', ''))
+        if digit in '0123456789' and len(digit) == 1 and bounds:
+            x1, y1, x2, y2 = map(int, bounds.groups())
+            if digit in coords:
+                raise ValueError('无法唯一确认支付数字键盘')
+            coords[digit] = ((x1 + x2) // 2, (y1 + y2) // 2)
+    if len(coords) != 10:
+        raise ValueError('当前支付宝数字键盘不可完整解析，未输入密码')
+    marker = PAYMENT_HOME + '/payments/' + hashlib.sha256(order.encode()).hexdigest() + '.attempt'
+    claim = 'umask 077; mkdir -p ' + shlex.quote(PAYMENT_HOME + '/payments') + '; mkdir ' + shlex.quote(marker)
+    cases = '\n'.join(f'{d}) input tap {x} {y} ;;' for d, (x, y) in coords.items())
+    script = ('set +x; password=$(run-as com.termux cat ' + shlex.quote(PAYMENT_SECRET) + ') || exit 21; '
+              'case "$password" in *[!0-9]*|"") exit 22 ;; esac; [ "${#password}" -eq 6 ] || exit 22; '
+              'run-as com.termux sh -c ' + shlex.quote(claim) + ' >/dev/null 2>&1 || exit 23; '
+              'while [ -n "$password" ]; do digit=${password%"${password#?}"}; password=${password#?}; '
+              'case "$digit" in\n' + cases + '\nesac || exit 24; sleep 0.15; done; unset password digit; echo typed')
+    ensure_online()
+    try:
+        proc = subprocess.run([ADB, '-s', SERIAL, 'shell', 'sh -c ' + shlex.quote(script)], env=ENV,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45)
+    except Exception as exc:
+        raise ValueError('本地密码输入结果未知，请核对原订单，禁止重试扣款') from exc
+    if proc.returncode or proc.stdout.decode().strip() != 'typed':
+        raise ValueError('本地密码输入未确认或本订单已有尝试；请核对原订单，禁止重试')
+    return {'ok': True, 'typed': True, 'storage': 'phone_local'}
 
 def token():
     if not os.path.exists(TOKEN_FILE):
@@ -108,7 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                     activity = next((line.strip() for line in top.splitlines() if "mResumedActivity" in line), "")
                     size = shell("wm", "size").decode().strip()
                     return self.send_json(200, {"ok": True, "online": True, "serial": SERIAL,
-                                                "boot": boot, "activity": activity, "size": size})
+                                                "boot": boot, "activity": activity, "size": size,
+                                                "alipay_secret_configured": os.path.exists("/data/local/tmp/.yuna_alipay")})
                 except Exception as error:
                     return self.send_json(200, {"ok": True, "online": False, "serial": SERIAL,
                                                 "error": str(error)[:300]})
@@ -154,7 +223,13 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("body too large")
             body = json.loads(self.rfile.read(length) or b"{}")
             action = str(body.get("action") or "")
-            if action == "tap":
+            if action == 'payment_credential_status':
+                return self.send_json(200, {'ok': True, 'configured': credential_configured(), 'storage': 'phone_local'})
+            elif action == 'payment_local_input':
+                result = local_payment_input(body)
+                audit({'action': action, 'ok': True, 'order_fingerprint': hashlib.sha256(str(body.get('order_id')).encode()).hexdigest()[:16]})
+                return self.send_json(200, result)
+            elif action == "tap":
                 out = shell("input", "tap", str(intval(body.get("x"), "x", 0, 10000)),
                             str(intval(body.get("y"), "y", 0, 20000)))
             elif action == "swipe":
@@ -193,6 +268,32 @@ class Handler(BaseHTTPRequestHandler):
                     if count > 2000: raise ValueError("当前输入过长，停止替换")
                     shell("input", "keyevent", "123", *(["67"] * (count + 1)))
                 out = shell("input", "text", text.replace(" ", "%s"))
+            elif action == "alipay_password":
+                secret_path = "/data/local/tmp/.yuna_alipay"
+                try:
+                    value = open(secret_path, encoding="utf-8").read().strip()
+                except OSError:
+                    raise ValueError("本地支付宝凭证未配置")
+                if not re.fullmatch(r"\d{6}", value):
+                    raise ValueError("本地支付宝凭证格式无效")
+                shell("uiautomator", "dump", "/sdcard/yuna-alipay.xml", timeout=60)
+                tree = ET.fromstring(shell("cat", "/sdcard/yuna-alipay.xml", timeout=30).decode("utf-8", "ignore"))
+                keys = {}
+                for node in tree.iter("node"):
+                    text = (node.get("text") or "").strip()
+                    if text in "0123456789" and len(text) == 1:
+                        b = [int(v) for v in re.findall(r"\d+", node.get("bounds") or "")]
+                        if len(b) == 4:
+                            keys[text] = ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+                if len(keys) < 10:
+                    raise ValueError("当前不是支付宝数字密码键盘")
+                for ch in value:
+                    x, y = keys[ch]
+                    shell("input", "tap", str(x), str(y))
+                    time.sleep(0.12)
+                out = b""
+                audit({"action": action, "ok": True, "method": "local-secret"})
+                return self.send_json(200, {"ok": True, "output": "local-secret-entered"})
             elif action == "key":
                 out = shell("input", "keyevent", str(intval(body.get("keycode"), "keycode", 0, 400)))
             elif action == "launch":

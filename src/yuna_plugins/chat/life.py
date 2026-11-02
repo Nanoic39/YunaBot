@@ -41,6 +41,9 @@ LOCATIONS = {
     "咖啡馆": {"kind": "outside", "indoor": True},
     "公园": {"kind": "outside", "indoor": False},
     "学校": {"kind": "outside", "indoor": True},
+    "广场": {"kind": "outside", "indoor": False},
+    "商场一层": {"kind": "outside", "indoor": True},
+    "商场小摊": {"kind": "outside", "indoor": True},
 }
 
 TRAVEL_MINUTES = {
@@ -62,14 +65,20 @@ TEMPLATES = [
     ("画画", "书房", ["铺开画纸", "勾线", "上色"], 70, 0.12, "画画"),
     ("做书签", "书房", ["挑纸", "画样式", "裁切", "压平"], 50, 0.08, "手作"),
     ("整理表情", "书房", ["分类", "重命名", "归档"], 40, 0.06, "整理"),
-    ("听歌发呆", "卧室", ["戴上耳机", "发呆"], 35, 0.02, "音乐"),
+    ("听一张专辑", "客厅", ["挑一张专辑", "听几首歌", "留下一段听后感"], 35, 0.02, "音乐"),
     ("窝着看番", "客厅", ["打开番剧", "看一集"], 50, 0.03, "看番"),
     ("泡茶", "厨房", ["烧水", "泡茶"], 15, 0.02, "生活"),
     ("整理房间", "卧室", ["收衣服", "擦桌子", "归位"], 35, 0.08, "生活"),
     ("去便利店", "便利店", ["出门", "挑东西", "结账"], 35, 0.05, "生活"),
-    ("在咖啡馆坐一会儿", "咖啡馆", ["点单", "找窗边座位", "发呆"], 45, 0.02, "生活"),
+    ("在咖啡馆读一会儿书", "咖啡馆", ["找座位", "读一章", "记下一句话"], 45, 0.03, "阅读"),
     ("去公园散步", "公园", ["出门", "沿路走一圈", "找长椅坐"], 45, 0.06, "散步"),
     ("在食堂吃饭", "学校", ["排队", "吃饭"], 30, 0.03, "生活"),
+    ("做一顿饭", "厨房", ["看看食材", "做饭", "吃饭收拾"], 35, 0.05, "生活"),
+    ("喝水", "厨房", ["接一杯水", "慢慢喝完"], 5, 0.0, "生活"),
+    ("闭目休息", "客厅", ["放下手里的东西", "靠一会儿", "伸展身体"], 25, 0.0, "休息"),
+    ("逛逛广场", "广场", ["看看今天的摊位", "慢慢绕一圈"], 35, 0.06, "探索"),
+    ("看看商场的新店", "商场一层", ["看楼层导览", "逛两家感兴趣的店"], 45, 0.07, "探索"),
+    ("看看小摊的手作", "商场小摊", ["看看不同材料", "记下一个喜欢的样式"], 30, 0.04, "手作"),
 ]
 
 SLEEP_HOURS = {0, 1, 2, 3, 4, 5, 6}
@@ -115,9 +124,10 @@ class LifeState:
         hour = _hour(now)
         activity = None
         if hour in SLEEP_HOURS:
-            activity = self._make_activity("睡觉", "卧室", ["洗漱", "躺下"], 8 * 60, 0.0, "休息", phase="active")
+            minute = datetime.fromtimestamp(now + TZ_OFFSET * 3600, timezone.utc).minute
+            activity = self._make_activity("睡觉", "卧室", ["洗漱", "躺下"], max(30, (7 - hour) * 60 - minute), 0.0, "休息", phase="active")
         return {
-            "version": 2,
+            "version": 3,
             "updated": now,
             "location": "卧室",
             "location_since": now,
@@ -132,6 +142,7 @@ class LifeState:
             "share_stats": {},
             "pending_shares": [],
             "tool_runs": [],
+            "visits": {},
             "dimensions": {
                 "joy": 0.42, "calm": 0.62, "sadness": 0.08, "anger": 0.04,
                 "anxiety": 0.18, "loneliness": 0.25, "confidence": 0.52,
@@ -167,7 +178,7 @@ class LifeState:
             return data
         for key in ("location", "location_since", "travel", "activity", "idle_until",
                     "plans", "history", "share_pool", "last_share", "share_stats",
-                    "pending_shares", "tool_runs", "dimensions", "preferences"):
+                    "pending_shares", "tool_runs", "dimensions", "preferences", "visits", "paused_activity"):
             if key in raw:
                 data[key] = raw[key]
         try:
@@ -175,7 +186,7 @@ class LifeState:
         except (TypeError, ValueError):
             data["energy"] = data["energy"]
         data["location"] = str(data.get("location") or "卧室")
-        if data["location"] not in LOCATIONS:
+        if data["location"] not in LOCATIONS and not (self.world and self.world.node_id_by_name(data["location"])):
             data["location"] = "卧室"
         # 离线补算上限：只推进当前活动，不批量模拟未发生的经历
         try:
@@ -207,6 +218,10 @@ class LifeState:
         data["share_stats"] = data.get("share_stats") if isinstance(data.get("share_stats"), dict) else {}
         data["pending_shares"] = data.get("pending_shares") if isinstance(data.get("pending_shares"), list) else []
         data["tool_runs"] = data.get("tool_runs") if isinstance(data.get("tool_runs"), list) else []
+        data["visits"] = data.get("visits") if isinstance(data.get("visits"), dict) else {}
+        # Migrate old mandatory empty intervals; explicit event recovery stays scheduled.
+        if int(raw.get("version") or 0) < 3 and not data.get("activity") and int(data.get("idle_until") or 0) - _now() > 5 * 60:
+            data["idle_until"] = _now()
         dims = data.get("dimensions") if isinstance(data.get("dimensions"), dict) else {}
         defaults = self._default_dimensions()
         data["dimensions"] = {k: _clamp(float(dims.get(k, v))) for k, v in defaults.items()}
@@ -230,7 +245,7 @@ class LifeState:
             "id": f"{int(now)}-{random.randint(100, 999)}",
             "name": name,
             "location": location,
-            "kind": LOCATIONS.get(location, {}).get("kind", "home"),
+            "kind": self._location_meta(location).get("kind", "home"),
             "interest": interest,
             "steps": steps,
             "step": steps[0] if steps else "",
@@ -252,6 +267,7 @@ class LifeState:
         self._data["activity"] = activity
         self._data["location"] = location
         self._data["location_since"] = _now()
+        self._data.setdefault("visits", {})[location] = _now()
         if self.world is not None:
             node = self.world.node_id_by_name(location)
             if node:
@@ -307,19 +323,10 @@ class LifeState:
                 self._data["activity"] = paused
                 self._data["idle_until"] = 0
             else:
-                # 玩完电脑不要立刻进入长时间空转，也不要把“刷电脑”当成唯一后续活动。
                 self._data["idle_until"] = 0
-                location = self._data.get("location") or "卧室"
-                candidates = [t for t in TEMPLATES
-                              if t[1] == location and t[0] not in ("刷电脑", "使用电脑")]
-                if not candidates:
-                    candidates = [t for t in TEMPLATES
-                                  if t[1] in ("卧室", "客厅", "书房") and t[0] not in ("刷电脑", "使用电脑")]
-                if candidates and _hour() not in SLEEP_HOURS:
-                    name, place, steps, minutes, cost, interest = random.choice(candidates)
-                    self._start(name, place, steps, minutes, cost, interest)
-                else:
-                    self._data["idle_until"] = _now() + random.randint(180, 480)
+                item = self._choose_template()
+                if item:
+                    self._begin_selected(item)
             self._save()
         return self.snapshot()
 
@@ -329,12 +336,15 @@ class LifeState:
         activity["ended"] = _now()
         activity["result_note"] = reason
         self._data["activity"] = None
-        self._data["energy"] = _clamp(self._data["energy"] - float(activity.get("energy_cost", 0)))
-        self._data["idle_until"] = _now() + random.randint(25, 65) * 60
+        # Energy and needs are settled incrementally in _drift_dimensions. A completed
+        # activity does not force a long empty state before choosing the next one.
+        self._data["idle_until"] = 0
         self._data["history"] = (self._data.get("history") or [])[-99:] + [{
             "time": _now(), "name": activity.get("name"), "location": activity.get("location"),
             "phase": "complete", "progress": 1.0, "tool_result": activity.get("tool_result", False),
+            "reason": activity.get("decision_reason", ""),
         }]
+        self._data["plans"] = [plan for plan in self._data.get("plans", []) if plan.get("activity") != activity.get("name")][-8:]
         # 低频突发事件：不是每次都有，触发后把事件写入分享池并应用后果
         if self.world is not None:
             try:
@@ -364,7 +374,7 @@ class LifeState:
                 self._save()
                 return
         # 只有产生了具体进展才进入待分享池；睡觉、短活动不进入
-        if activity.get("name") == "睡觉" or float(activity.get("progress") or 0) < 0.35:
+        if activity.get("name") in {"睡觉", "喝水", "闭目休息"} or float(activity.get("progress") or 0) < 0.35:
             self._save()
             return
         key = f"{(activity.get('name') or '').strip()}:{datetime.fromtimestamp(_now() + TZ_OFFSET * 3600, timezone.utc).strftime('%Y-%m-%d')}"
@@ -417,22 +427,74 @@ class LifeState:
     def _choose_template(self) -> tuple | None:
         hour = _hour()
         if hour in SLEEP_HOURS:
-            return ("睡觉", "卧室", ["洗漱", "躺下"], 8 * 60, 0.0, "休息")
-        location = self._data.get("location") or "卧室"
+            minute = datetime.fromtimestamp(_now() + TZ_OFFSET * 3600, timezone.utc).minute
+            return ("睡觉", "卧室", ["洗漱", "躺下"], max(30, (7 - hour) * 60 - minute), 0.0, "休息")
+        dims = self._data.get("dimensions") or self._default_dimensions()
+        energy = float(self._data.get("energy", .6))
+        if float(dims.get("thirst", 0)) >= .72:
+            return next(item for item in TEMPLATES if item[0] == "喝水")
+        if float(dims.get("hunger", 0)) >= .72:
+            return next(item for item in TEMPLATES if item[0] == "做一顿饭")
+        if energy < .25 or float(dims.get("fatigue", 0)) >= .82:
+            return next(item for item in TEMPLATES if item[0] == "闭目休息")
         weather = self.world.weather() if self.world is not None else {}
-        if weather.get("condition") in ("rain", "storm") and random.random() < 0.8:
-            location = random.choice(["卧室", "客厅", "书房"])
-        candidates = [item for item in TEMPLATES if item[1] == location]
-        if not candidates:
-            candidates = [item for item in TEMPLATES if LOCATIONS.get(item[1], {}).get("kind") == "home"]
-        if not candidates:
-            candidates = list(TEMPLATES[:4])
+        candidates = list(TEMPLATES)
+        if self.world is not None:
+            known = {item[1] for item in candidates}
+            for node in self.world.data.get("nodes", {}).values():
+                name = str(node.get("name") or "")
+                if name and name not in known and node.get("kind") in {"shop", "park", "plaza"}:
+                    candidates.append((f"逛逛{name}", name, ["看看路线", "慢慢逛一圈", "记下感兴趣的地方"], 35, .06, "探索"))
         prefs = (self._data.get("preferences") or {}).get("interests") or {}
-        # 稳定偏好只做温和加权，不决定一切
+        recent = (self._data.get("history") or [])[-6:]
+        visits = self._data.get("visits") or {}
+        now = _now()
+        last_outside = max([int(row.get("time") or 0) for row in self._data.get("history", [])
+                            if self._location_meta(str(row.get("location") or "")).get("kind") == "outside"]
+                           + [int(t) for place, t in visits.items() if self._location_meta(place).get("kind") == "outside"] + [0])
+        outdoor_due = 9 <= hour < 20 and energy >= .32 and now - last_outside >= 8 * 3600
         weighted = []
         for item in candidates:
-            weight = 1.0 + float(prefs.get(item[5], 0.5)) * 0.8
+            name, place, _, _, _, interest = item
+            meta = self._location_meta(place)
+            outside = meta.get("kind") == "outside"
+            # A severe weather alert prevents any outing; rain avoids exposed walks.
+            if outside and (weather.get("condition") == "storm" or hour >= 21 or hour < 8):
+                continue
+            if outside and weather.get("condition") in {"rain", "hot", "cold"} and not meta.get("indoor"):
+                continue
+            if outside and (energy < .4 or float(dims.get("fatigue", 0)) > .68):
+                continue
+            if name == "喝水" and float(dims.get("thirst", 0)) < .42:
+                continue
+            if name in {"做一顿饭", "在食堂吃饭"} and float(dims.get("hunger", 0)) < .45:
+                continue
+            if name == "闭目休息" and energy > .6 and float(dims.get("fatigue", 0)) < .5:
+                continue
+            weight = 1.0 + float(prefs.get(interest, .5)) * .8
+            repeat_count = sum(row.get("name") == name for row in recent)
+            weight *= .12 ** repeat_count
+            if recent and recent[-1].get("name") == name:
+                weight *= .1
+            if outside:
+                weight *= (4.5 if outdoor_due else .6)
+                if place not in visits:
+                    weight *= 1.0 + float(dims.get("curiosity", .5)) * 2.2
+            if interest in {"探索", "散步"}:
+                weight *= 1 + float(dims.get("boredom", 0)) + float(dims.get("restlessness", 0))
+            if interest in {"画画", "手作", "写作"}:
+                weight *= .6 + float(dims.get("creativity", .5)) + float(dims.get("motivation", .5)) * .5
+            if interest == "休息":
+                weight *= .5 + float(dims.get("stress", .2)) + float(dims.get("fatigue", .3))
+            if place == self._data.get("location"):
+                weight *= 1.12  # continuity is a small preference, never a location lock
             weighted.append((weight, item))
+        if outdoor_due:
+            outings = [(weight, item) for weight, item in weighted if self._location_meta(item[1]).get("kind") == "outside"]
+            if outings:
+                weighted = outings
+        if not weighted:
+            return next(item for item in TEMPLATES if item[0] == "听一张专辑")
         total = sum(weight for weight, _ in weighted)
         pick = random.random() * total
         cur = 0.0
@@ -440,44 +502,111 @@ class LifeState:
             cur += weight
             if pick <= cur:
                 return item
-        return candidates[-1]
+        return weighted[-1][1]
+
+    def _location_meta(self, location: str) -> dict:
+        if location in LOCATIONS:
+            return LOCATIONS[location]
+        if self.world is not None:
+            node = self.world.node(self.world.node_id_by_name(location))
+            if node:
+                return {"kind": "outside", "indoor": not bool(node.get("outdoor"))}
+        return {"kind": "home", "indoor": True}
+
+    def _begin_selected(self, item: tuple) -> None:
+        name, location, steps, minutes, cost, interest = item
+        reasons = {"喝水": "口渴偏高，先去厨房补水", "做一顿饭": "有些饿了，安排做饭、吃饭和收拾",
+                   "闭目休息": "疲劳或精力不足，先恢复再继续未完成的事", "睡觉": "到了夜间作息时段，休息到早晨"}
+        if self._location_meta(location).get("kind") == "outside":
+            reason = ("白天精力允许，近期外出较少，沿地图路线出去走走" if not self._data.get("visits", {}).get(location)
+                      else "精力和天气允许，换一个环境继续感兴趣的活动")
+        else:
+            reason = "结合兴趣与当前需求，接续具体活动并减少近期重复"
+        reason = reasons.get(name, reason)
+        if location != self._data.get("location"):
+            result = self.travel_to(location, reason=f"准备{name}")
+            if result.get("ok"):
+                self._data["travel"]["next_activity"] = list(item)
+                self._data["travel"]["decision_reason"] = reason
+                return
+        activity = self._start(*item)
+        activity["decision_reason"] = reason
 
     def _advance(self, now: int | None = None) -> None:
         now = now or _now()
+        elapsed = max(0, now - int(self._data.get("updated") or now))
         travel = self._data.get("travel") or {}
         if travel:
             try:
                 arrived = int(travel.get("arrive") or 0)
             except (TypeError, ValueError):
                 arrived = 0
+            self._drift_dimensions(elapsed, None, travelling=True)
             if arrived and now >= arrived:
                 self._data["location"] = str(travel.get("to") or "卧室")
                 self._data["location_since"] = now
                 self._data["travel"] = {}
+                self._data.setdefault("visits", {})[self._data["location"]] = now
                 if self.world is not None:
                     node = self.world.node_id_by_name(self._data["location"])
                     if node:
                         self.world.set_current(node)
                 activity = self._data.get("activity")
-                if isinstance(activity, dict) and activity.get("phase") == "paused":
+                next_activity = travel.get("next_activity")
+                if isinstance(next_activity, list) and len(next_activity) == 6:
+                    selected = self._start(*next_activity)
+                    selected["decision_reason"] = str(travel.get("decision_reason") or "到达后继续原来的出行安排")
+                elif isinstance(activity, dict) and activity.get("phase") == "paused" and activity.get("location") == self._data["location"]:
                     activity["phase"] = "active"
                     activity["planned_end"] = now + max(10, int(activity.get("remaining_minutes", 30))) * 60
+                else:
+                    if isinstance(activity, dict) and activity.get("phase") == "paused":
+                        self._data["paused_activity"] = dict(activity)
+                    destination = self._data["location"]
+                    options = [item for item in TEMPLATES if item[1] == destination]
+                    item = options[0] if options else (f"看看{destination}", destination, ["看看周围", "走一小圈"], 25, .03, "探索")
+                    selected = self._start(*item)
+                    selected["decision_reason"] = str(travel.get("reason") or "到了目的地，先在这里完成一件具体的小事")
             self._data["updated"] = now
             return
         activity = self._data.get("activity")
-        elapsed = max(0, now - int(self._data.get("updated") or now))
         self._drift_dimensions(elapsed, activity)
         if isinstance(activity, dict):
             phase = str(activity.get("phase") or "active")
-            if activity.get("name") == "睡觉" and phase == "active":
-                self._data["energy"] = _clamp(self._data["energy"] + elapsed / 3600 * 0.09)
             if phase == "prepare" and now >= int(activity.get("started") or now) + 5 * 60:
                 activity["phase"] = "active"
+                phase = "active"
             if phase == "paused" and int(activity.get("resume_at") or 0) and now >= int(activity.get("resume_at") or 0):
                 activity["phase"] = "active"
                 activity["planned_end"] = now + max(10, int(activity.get("remaining_minutes") or 25)) * 60
                 activity.pop("resume_at", None)
                 phase = "active"
+            if (phase == "paused" and not activity.get("resume_at") and not activity.get("phone_play")
+                    and (float(self._data.get("energy", 0)) <= .16 or float(self._data.get("dimensions", {}).get("fatigue", 0)) >= .82)):
+                self._data["paused_activity"] = dict(activity)
+                self._data["activity"] = None
+                self._begin_selected(next(item for item in TEMPLATES if item[0] == "闭目休息"))
+                self._data["updated"] = now
+                return
+            if phase == "active" and not activity.get("phone_play") and activity.get("interest") != "休息":
+                needs = self._data.get("dimensions") or {}
+                urgent = None
+                if float(needs.get("thirst", 0)) >= .78:
+                    urgent = "喝水"
+                elif float(needs.get("hunger", 0)) >= .78:
+                    urgent = "做一顿饭"
+                elif float(needs.get("sleepiness", 0)) >= .9 or float(needs.get("fatigue", 0)) >= .9:
+                    urgent = "睡觉" if _hour(now) in SLEEP_HOURS else "闭目休息"
+                if urgent and activity.get("name") != urgent:
+                    activity["phase"] = "paused"
+                    activity["remaining_minutes"] = max(5, int((int(activity.get("planned_end") or now) - now) / 60))
+                    self._data["paused_activity"] = dict(activity)
+                    self._data["activity"] = None
+                    item = next((x for x in TEMPLATES if x[0] == urgent), None)
+                    if item:
+                        self._begin_selected(item)
+                        self._data["updated"] = now
+                        return
             if phase == "active":
                 start = int(activity.get("started") or now)
                 end = int(activity.get("planned_end") or now)
@@ -488,57 +617,94 @@ class LifeState:
                     activity["step"] = steps[min(len(steps) - 1, int(activity["progress"] * len(steps)))]
                 if now >= end:
                     self._complete(activity)
-                elif self._data["energy"] <= 0.16:
+                elif self._data["energy"] <= 0.16 and activity.get("interest") != "休息" and not activity.get("phone_play"):
                     activity["phase"] = "paused"
                     activity["remaining_minutes"] = max(5, int((end - now) / 60))
-            if self._data["energy"] <= 0.12 and str((self._data.get("activity") or {}).get("phase")) == "active":
-                self._data["activity"]["phase"] = "paused"
-                self._data["activity"]["remaining_minutes"] = 15
-            self._data["updated"] = now
-            return
+                    self._data["paused_activity"] = dict(activity)
+                    self._data["activity"] = None
+                    self._begin_selected(next(item for item in TEMPLATES if item[0] == "闭目休息"))
+            if self._data.get("activity") is not None or self._data.get("travel"):
+                self._data["updated"] = now
+                return
         if now < int(self._data.get("idle_until") or 0):
             self._data["energy"] = _clamp(self._data["energy"] + elapsed / 3600 * 0.02)
             self._data["updated"] = now
             return
         hour = _hour(now)
-        if hour in SLEEP_HOURS and self._data.get("location") != "卧室":
-            self.travel_to("卧室")
+        paused = self._data.get("paused_activity")
+        dims = self._data.get("dimensions") or {}
+        if (isinstance(paused, dict) and float(self._data.get("energy", 0)) >= .4 and hour not in SLEEP_HOURS
+                and float(dims.get("fatigue", 0)) < .7 and max(float(dims.get("hunger", 0)), float(dims.get("thirst", 0))) < .72):
+            self._data.pop("paused_activity", None)
+            item = (str(paused.get("name")), str(paused.get("location")), paused.get("steps") or [],
+                    max(5, int(paused.get("remaining_minutes") or 20)), float(paused.get("energy_cost") or 0),
+                    str(paused.get("interest") or "生活"))
+            self._begin_selected(item)
+            self._data["updated"] = now
             return
         item = self._choose_template()
         if not item:
             return
-        name, location, steps, minutes, cost, interest = item
-        if location != self._data.get("location"):
-            # 空闲时偶尔出门；不瞬移，先进入途中状态
-            if random.random() < 0.35:
-                self.travel_to(location)
-                return
-            location = self._data.get("location") or "卧室"
-            candidate = next((x for x in TEMPLATES if x[1] == location), None)
-            if candidate is None:
-                candidate = next((x for x in TEMPLATES if x[1] in ("卧室", "客厅", "书房")), TEMPLATES[0])
-            name, location, steps, minutes, cost, interest = candidate
-        self._start(name, location, steps, minutes, cost, interest)
+        self._begin_selected(item)
         self._data["updated"] = now
 
-    def _drift_dimensions(self, elapsed: int, activity: dict | None) -> None:
+    @staticmethod
+    def _activity_effects(activity: dict | None) -> dict:
+        """Per-hour effects of the simulated activity; never a claim of tool output."""
+        if not isinstance(activity, dict) or activity.get("phase") not in {"prepare", "active"}:
+            return {}
+        name, interest = str(activity.get("name") or ""), str(activity.get("interest") or "")
+        if name == "睡觉":
+            return {"fatigue": -.16, "sleepiness": -.15, "stress": -.05, "energy": .12}
+        if name == "喝水":
+            return {"thirst": -8.0, "comfort": .18}
+        if name in {"做一顿饭", "在食堂吃饭"}:
+            return {"hunger": -1.0, "thirst": -.12, "satisfaction": .15, "energy": .15}
+        if interest == "休息":
+            return {"fatigue": -1.2, "sleepiness": -.45, "stress": -.25, "calm": .18, "energy": .6}
+        if interest in {"散步", "探索"}:
+            return {"boredom": -.35, "restlessness": -.3, "stress": -.15, "joy": .12, "curiosity": .08}
+        if interest in {"写作", "画画", "手作", "阅读", "整理"}:
+            return {"boredom": -.25, "focus": .12, "satisfaction": .16, "creativity": .06}
+        if interest in {"音乐", "看番"}:
+            return {"stress": -.12, "calm": .12, "joy": .1, "boredom": -.15}
+        return {}
+
+    def _drift_dimensions(self, elapsed: int, activity: dict | None, *, travelling: bool = False) -> None:
         if elapsed <= 0:
             return
         dims = self._data.setdefault("dimensions", self._default_dimensions())
-        minutes = min(12 * 60, elapsed) / 60.0
+        hours = min(12 * 3600, elapsed) / 3600.0
         sleeping = isinstance(activity, dict) and activity.get("name") == "睡觉"
-        if sleeping:
-            dims["fatigue"] = _clamp(dims["fatigue"] - 0.05 * minutes)
-            dims["sleepiness"] = _clamp(dims["sleepiness"] - 0.06 * minutes)
-            dims["alertness"] = _clamp(dims["alertness"] - 0.02 * minutes)
-        else:
-            dims["fatigue"] = _clamp(dims["fatigue"] + 0.008 * minutes)
-            dims["sleepiness"] = _clamp(dims["sleepiness"] + 0.004 * minutes)
-            dims["alertness"] = _clamp(dims["alertness"] - 0.003 * minutes)
-        dims["hunger"] = _clamp(dims["hunger"] + 0.006 * minutes)
-        dims["thirst"] = _clamp(dims["thirst"] + 0.008 * minutes)
-        dims["stress"] = _clamp(dims["stress"] + 0.0015 * minutes)
-        dims["comfort"] = _clamp(dims["comfort"] - 0.001 * minutes)
+        rates = {"hunger": .035 if sleeping else .084, "thirst": .04 if sleeping else .12,
+                 "fatigue": 0 if sleeping else .045, "sleepiness": 0 if sleeping else .048,
+                 "stress": 0 if sleeping else .012, "comfort": -.006,
+                 "boredom": .04 if not activity and not travelling else 0}
+        for key, rate in rates.items():
+            dims[key] = _clamp(dims[key] + rate * hours)
+        # Emotional spikes settle toward a baseline instead of accumulating forever.
+        defaults = self._default_dimensions()
+        for key in ("anger", "sadness", "anxiety", "irritability", "joy", "sensory_load"):
+            dims[key] = _clamp(defaults[key] + (dims[key] - defaults[key]) * math.exp(-hours / 2.5))
+        effect_hours = hours
+        if isinstance(activity, dict):
+            previous = int(self._data.get("updated") or _now())
+            end = int(activity.get("planned_end") or previous + elapsed)
+            effect_hours = min(hours, max(0, end - previous) / 3600)
+        effects = self._activity_effects(activity)
+        for key, rate in effects.items():
+            if key != "energy":
+                dims[key] = _clamp(dims[key] + rate * effect_hours)
+        energy_delta = effects.get("energy", -.01) * effect_hours
+        if isinstance(activity, dict) and activity.get("phase") in {"prepare", "active"}:
+            duration = max(60, int(activity.get("planned_end") or 0) - int(activity.get("started") or 0))
+            energy_delta -= float(activity.get("energy_cost") or 0) * min(1, effect_hours * 3600 / duration)
+        elif travelling:
+            energy_delta -= .06 * hours
+        self._data["energy"] = _clamp(float(self._data.get("energy", .6)) + energy_delta)
+        dims["alertness"] = _clamp(1 - .55 * dims["sleepiness"] - .45 * dims["fatigue"])
+        if not sleeping:
+            dims["comfort"] = _clamp(dims["comfort"] + (.65 - dims["comfort"]) * min(.12 * hours, 1))
 
     def nudge_dimensions(self, delta: dict, *, amount: float = 1.0) -> dict:
         dims = self._data.setdefault("dimensions", self._default_dimensions())
@@ -558,7 +724,7 @@ class LifeState:
         self._save()
         snap = {
             "location": self._data.get("location") or "卧室",
-            "location_kind": LOCATIONS.get(self._data.get("location") or "", {}).get("kind", "home"),
+            "location_kind": self._location_meta(self._data.get("location") or "").get("kind", "home"),
             "location_since": int(self._data.get("location_since") or 0),
             "travel": dict(self._data.get("travel") or {}),
             "energy": round(float(self._data.get("energy") or 0), 3),
@@ -572,6 +738,11 @@ class LifeState:
             "preferences": dict(self._data.get("preferences") or {}),
             "world": self.world.snapshot() if self.world is not None else {},
             "updated": int(self._data.get("updated") or _now()),
+            "decision_reason": str((self._data.get("travel") or {}).get("decision_reason") or
+                                   (activity or {}).get("decision_reason") or "根据当前需求和已有行程继续安排"),
+            "activity_effects": {"per_hour": self._activity_effects(activity), "basis": "按实际经过时间累计，模拟生活状态"},
+            "recent_transitions": [{"location": place, "time": int(moment)} for place, moment in
+                                   sorted((self._data.get("visits") or {}).items(), key=lambda row: row[1])[-6:]],
         }
         return snap
 
@@ -591,6 +762,8 @@ class LifeState:
                 f"当前活动「{activity.get('name')}」阶段：{phase_text}，进度约 {round(float(activity.get('progress') or 0) * 100)}%，"
                 f"正在做：{activity.get('step') or '—'}。"
             )
+            if activity.get("decision_reason"):
+                lines.append("这样安排的原因：" + str(activity["decision_reason"]) + "。不必向聊天对象复述。")
             if activity.get("phone_play"):
                 lines.append("这是你获准使用手机的时间；可以按手机任务行动，不要虚构没看到的内容。")
             elif activity.get("tool_result"):
@@ -602,7 +775,7 @@ class LifeState:
             if activity.get("items"):
                 lines.append("相关物品：" + "、".join(str(x) for x in activity.get("items")[:6]) + "。")
         else:
-            lines.append("你现在处于空闲，没有正在进行的活动。")
+            lines.append("你正在沿原定路线前往下一项活动。" if travel else "你正在收尾或挑下一件具体的事，没有必要把过渡描述成发呆。")
         prefs = snap.get("preferences") or {}
         aesthetic = prefs.get("aesthetic") or []
         if aesthetic:
@@ -635,7 +808,7 @@ class LifeState:
 
     def travel_to(self, destination: str, reason: str = "") -> dict:
         destination = str(destination or "").strip()
-        if destination not in LOCATIONS:
+        if destination not in LOCATIONS and not (self.world and self.world.node_id_by_name(destination)):
             return {"ok": False, "error": "unknown_location"}
         current = self._data.get("location") or "卧室"
         if destination == current:
@@ -653,7 +826,8 @@ class LifeState:
                 route_desc = str(chosen.get("description") or "")
                 route_nodes = chosen.get("nodes") or []
         if minutes is None:
-            minutes = 10 if LOCATIONS.get(current, {}).get("kind") == "home" and LOCATIONS.get(destination, {}).get("kind") == "home" else 20
+            minutes = TRAVEL_MINUTES.get(("家", destination)) or TRAVEL_MINUTES.get(("家", current))
+            minutes = minutes or (2 if self._location_meta(current).get("kind") == "home" and self._location_meta(destination).get("kind") == "home" else 20)
         now = _now()
         activity = self._data.get("activity")
         if isinstance(activity, dict) and activity.get("phase") in ("prepare", "active"):
