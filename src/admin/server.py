@@ -776,6 +776,25 @@ def create_app(driver, root: Path = ROOT):
         loader=getattr(plugin.module,'agent_chat_memory',None) if plugin else None
         return loader(goal) if callable(loader) else ''
     phone_agent.chat_memory_loader=agent_memory_loader
+    async def _notify_phone_aid(task, aid, kind, title, detail):
+        if kind not in ('password', 'payment'):
+            return
+        try:
+            from nonebot import get_bots
+            text = f"【手机任务需要你】\n{title}\n{detail}\n回复这条消息提供内容；密码不会写入记忆或日志。"
+            delivered = []
+            for bot in get_bots().values():
+                for owner in getattr(driver.config, 'superusers', set()):
+                    try:
+                        await bot.send_private_msg(user_id=int(owner), message=text)
+                        delivered.append(str(owner))
+                    except Exception:
+                        pass
+            task['notice_delivered_to'] = delivered
+            task['notified'] = bool(delivered)
+        except Exception:
+            pass
+
     async def _record_payment_handoff(task, handoff):
         row = handoff_store.create(task.get('id') or '', handoff.get('merchant'), handoff.get('order_id'),
                                    handoff.get('amount_minor'), handoff.get('purpose'))
@@ -795,6 +814,7 @@ def create_app(driver, root: Path = ROOT):
             pass
         return row
     phone_agent.payment_handoff_callback = _record_payment_handoff
+    phone_agent.aid_notify = _notify_phone_aid
     async def _share_to_whitelist_group(group: str, text: str):
         from src.agent.phone_agent import PhoneTaskError
         from src.agent.wechat_phone import WeChatPhone

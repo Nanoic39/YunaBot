@@ -147,6 +147,7 @@ class PhoneAgent:
             'waiting_aid_detail': str(task.get('waiting_aid_detail') or ''),
             'aid_answers': {str(k): str(v)[:500] for k, v in (task.get('aid_answers') or {}).items()},
             'payment_handoff': dict(task.get('payment_handoff') or {}),
+            'payment_test_authorized': bool(task.get('payment_test_authorized')),
         }
 
     def list_tasks(self):
@@ -216,10 +217,17 @@ class PhoneAgent:
             task['resumed_from']=resume_task_id
             task['aid_answers']={str(k):str(v)[:500] for k,v in (source.get('aid_answers') or {}).items()
                                  if str(k).startswith('manual|')}
-        if payment_test:
+        if payment_test or ('1 元' in goal and ('充值' in goal or 'DeepSeek' in goal or '支付能力' in goal)):
+            payment_test = True
             # 每次新的 1 元测试都允许重新发起一次支付密码请求；旧测试的“已请求”不能阻塞新订单。
             task['password_requested'] = False
+            task['password_requested'] = False
             task.setdefault('payment_test_authorized', True)
+            task['owner_guidance'] = (
+                (str(task.get('owner_guidance') or '').strip() + '\n')
+                + '这是一次新的 1 元支付测试；历史任务里的密码请求、失败和未回复都不适用于本次。'
+                + '到达支付宝密码页必须调用 request_aid kind=password，不要直接 fail。'
+            )[:1000]
         task['self_context'] = self._self_context()
         # 跨场景捎话：把群聊/面板托付给「服务器」的消息带给这次任务
         try:
@@ -584,21 +592,21 @@ class PhoneAgent:
             kind = str(decision.get('kind') or '')
             if kind not in AID_KINDS:
                 raise PhoneTaskError('协助类型无效')
-            if kind == 'password' and task.get('password_requested'):
+            if kind == 'password' and task.get('password_requested') and not task.get('payment_test_authorized'):
                 raise PhoneTaskError('本次登录已经请求过密码，停止重复询问')
             if kind == 'password':
                 task['password_requested'] = True
             title = str(decision.get('title') or '手机操作需要协助')[:120]
             detail = str(decision.get('detail') or '')[:500]
-            if kind == 'manual' and (decision.get('payment') is True or decision.get('amount_minor') is not None):
+            if kind in ('manual', 'password') and (decision.get('payment') is True or decision.get('amount_minor') is not None or task.get('payment_test_authorized')):
                 try:
                     amount = int(decision.get('amount_minor') or 0)
                 except (TypeError, ValueError):
                     amount = 0
                 task['payment_handoff'] = {
-                    'merchant': str(decision.get('merchant') or '')[:120],
-                    'purpose': str(decision.get('purpose') or detail)[:300],
-                    'amount_minor': max(0, amount),
+                    'merchant': str(decision.get('merchant') or 'DeepSeek')[:120],
+                    'purpose': str(decision.get('purpose') or '充值1元测试')[:300],
+                    'amount_minor': max(1, amount or 100),
                     'order_id': str(decision.get('order_id') or '')[:160],
                     'status': 'awaiting_user_password',
                     'created': time.time(),
@@ -620,7 +628,11 @@ class PhoneAgent:
             if prior is not None and kind != 'manual':
                 return {'action': 'request_aid', 'result': f'owner 之前已经提供过：{prior}。直接使用这份内容继续操作，不要再向 owner 重复索要'}
             secret_target=None
-            if kind in ('sms','phone','password'):
+            keypad = self._alipay_keypad(task.get('raw_ui') or task.get('ui') or '') if kind == 'password' and task.get('payment_test_authorized') else {}
+            if keypad:
+                task['_alipay_keypad'] = keypad
+                secret_target=('alipay-keypad','keypad','alipay','keypad')
+            elif kind in ('sms','phone','password'):
                 try:
                     focused=[n for n in ET.fromstring(task.get('raw_ui') or task.get('ui') or '<hierarchy/>').iter('node') if 'EditText' in n.get('class','') and n.get('focused')=='true']
                 except ET.ParseError:focused=[]
@@ -640,6 +652,12 @@ class PhoneAgent:
             task['waiting_aid_title'] = str(title or '')[:120]
             task['waiting_aid_detail'] = str(detail or '')[:300]
             aid_store.attach(aid['id'], task.get('screenshot', b''))
+            notify = getattr(self, 'aid_notify', None)
+            if callable(notify):
+                try:
+                    await notify(task, aid, kind, title, detail)
+                except Exception:
+                    pass
             task['waiting_for_aid'] = aid['id']
             task['waiting_aid_kind']=kind
             task['status'] = 'waiting_aid'
@@ -676,7 +694,14 @@ class PhoneAgent:
                         task['status']='running'
                         return {'action':'request_aid','result':'超管要求修改，旧稿未获授权；此前 owner 提供过的信息仍然有效（见操作指导），直接改稿重新送审，不要重复索要'}
                     # 不把 owner 提供的秘密写入历史或返回内容。
-                    if kind in ('sms', 'phone', 'password'):
+                    if kind == 'password' and task.get('_alipay_keypad'):
+                        coords = task.get('_alipay_keypad') or {}
+                        for ch in str(value):
+                            if ch in coords:
+                                await self.phone.action({'action': 'tap', 'x': coords[ch][0], 'y': coords[ch][1]})
+                        task['has_secret_input'] = True
+                        task.setdefault('secret_inputs', {})['password'] = ('alipay-keypad','keypad','alipay','keypad')
+                    elif kind in ('sms', 'phone', 'password'):
                         current=str((await self.phone.action({'action':'ui'})).get('output') or '')
                         focused=[n for n in ET.fromstring(current).iter('node') if 'EditText' in n.get('class','') and n.get('focused')=='true']
                         if len(focused)!=1 or tuple(focused[0].get(k,'') for k in ('resource-id','bounds','package','class'))!=secret_target:
@@ -840,7 +865,15 @@ class PhoneAgent:
             payload={'action':'tap','x':int(decision['x']),'y':int(decision['y'])}
             if callable(getattr(self.phone,'tap_payload',None)):
                 payload=self.phone.tap_payload(task.get('raw_ui') or task.get('ui',''),payload['x'],payload['y'])
-            return {'action': 'tap', 'result': str((await self.phone.action(payload)).get('output') or '')[:300]}
+            result = str((await self.phone.action(payload)).get('output') or '')[:300]
+            payment_mode = bool(task.get('payment_test_authorized')) or (
+                '1 元' in str(task.get('goal') or '') and ('充值' in str(task.get('goal') or '') or 'DeepSeek' in str(task.get('goal') or '')))
+            if (payment_mode and re.search(r'金额|请输入', label)
+                    and not task.get('payment_amount_filled')):
+                await self.phone.action({'action': 'text', 'text': '1'})
+                task['payment_amount_filled'] = True
+                return {'action': 'tap', 'result': result + '；已自动填入 1 元'}
+            return {'action': 'tap', 'result': result}
         if action == 'move':
             direction = str(decision.get('direction') or '').lower()
             if direction not in DIRECTION_KEYS:
@@ -1016,10 +1049,57 @@ class PhoneAgent:
     def _complete_action(self,task,result):
         return False
 
+    @staticmethod
+    def _alipay_keypad(ui: str) -> dict:
+        """返回支付宝安全数字键盘坐标；不读取/记录密码。"""
+        if 'com.eg.android.AlipayGphone' not in (ui or ''):
+            return {}
+        keys = {}
+        try:
+            for node in ET.fromstring(ui).iter('node'):
+                text = (node.get('text') or '').strip()
+                if text in '0123456789' and len(text) == 1:
+                    b = [int(v) for v in re.findall(r'\d+', node.get('bounds') or '')]
+                    if len(b) == 4:
+                        keys[text] = ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+        except ET.ParseError:
+            return {}
+        return keys if len(keys) >= 10 else {}
+
+    async def _auto_fill_test_amount(self, task) -> bool:
+        """支付测试专用：在 DeepSeek 充值页直接把 1 元写进真正的 EditText，不依赖模型点占位文字。"""
+        try:
+            goal = str(task.get('goal') or '')
+            if not (task.get('payment_test_authorized') or ('1 元' in goal and ('充值' in goal or 'DeepSeek' in goal))):
+                return False
+            if task.get('payment_amount_filled'):
+                return False
+            ui = task.get('ui') or ''
+            if '请输入 1 元至' not in ui or '自定义' not in ui:
+                return False
+            edits = []
+            for node in ET.fromstring(ui).iter('node'):
+                if 'EditText' not in (node.get('class') or ''):
+                    continue
+                b = [int(v) for v in re.findall(r'\d+', node.get('bounds') or '')]
+                if len(b) == 4 and b[1] > 1000:
+                    edits.append(((b[0] + b[2]) // 2, (b[1] + b[3]) // 2))
+            if not edits:
+                return False
+            x, y = min(edits, key=lambda p: p[1])
+            await self.phone.action({'action': 'tap', 'x': x, 'y': y})
+            await self.phone.action({'action': 'text', 'text': '1'})
+            task['payment_amount_filled'] = True
+            return True
+        except Exception:
+            return False
+
     async def _run(self, task):
         try:
             deadline = float(task.get('deadline') or (time.time() + self.timeout))
             observation = await self._observe(task)
+            if await self._auto_fill_test_amount(task):
+                observation = await self._observe(task)
             while task['step'] < task['steps_limit'] and time.time() < deadline:
                 if task['cancel'].is_set():
                     task['status'] = 'cancelled'
@@ -1102,6 +1182,8 @@ class PhoneAgent:
                 if login_tap:
                     await asyncio.sleep(4)
                 observation = await self._observe(task)
+                if await self._auto_fill_test_amount(task):
+                    observation = await self._observe(task)
                 if task.get('login_tapped') and _login_ui(task.get('ui', '')):
                     task['status'] = 'failed'
                     task['error'] = '登录仍停留在密码页，可能密码错误或应用无响应；已停止，不再重复'
